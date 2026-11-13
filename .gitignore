@@ -1,0 +1,10 @@
+*.pyc
+*.swp
+.tox/
+htmlcov/
+.coverage
+/.venv/
+/build/
+/dist/
+/metar.egg-info/
+/metar/_version.py
