@@ -1,0 +1,9 @@
+*.pyc
+*~
+.DS_Store
+ofxparse.egg-info/
+build/
+dist/
+nbproject/
+.coverage
+htmlcov
