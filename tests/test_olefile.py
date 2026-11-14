@@ -278,3 +278,308 @@ class FileHandleCloseTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestPlanStreamReads(unittest.TestCase):
+    """Tests for planning batched physical reads of several OLE streams."""
+
+    def setUp(self):
+        self.ole_file = u"tests/images/test-ole-file.doc"
+
+    def _stream_bytes(self, ole, names):
+        return dict((tuple(name), ole.openstream(name).read())
+                    for name in names)
+
+    def test_plan_sample_file_matches_direct_reads(self):
+        """All planned streams must be byte-identical to openstream()."""
+        names = ['WordDocument', '1Table',
+                 '\x05SummaryInformation', '\x01CompObj']
+        with olefile.OleFileIO(self.ole_file) as ole:
+            expected = self._stream_bytes(ole, names)
+            plan = ole.plan_stream_reads(names)
+            assembled = plan.fetch()
+            for name in names:
+                self.assertEqual(assembled[name], expected[tuple(name)])
+            self.assertEqual(plan.read_count, 1)
+            self.assertGreater(plan.extra_bytes, 0)
+
+    def test_extra_bytes_are_unrelated_bridged_bytes(self):
+        """Extra bytes only count bytes inside planned reads that no stream uses."""
+        names = ['WordDocument', '1Table',
+                 '\x05SummaryInformation', '\x01CompObj']
+        with olefile.OleFileIO(self.ole_file) as ole:
+            expected = self._stream_bytes(ole, names)
+            stream_spans = []
+            for name in names:
+                _, _, extents = ole._stream_mapping(name)
+                stream_spans.extend((start, start + length)
+                                    for _, start, length in extents)
+            plan = ole.plan_stream_reads(names)
+            # A stream byte implies its containing sector, so overlapping
+            # stream spans are widened the same way the planner does.
+            sector_spans = []
+            for a, b in stream_spans:
+                sector_spans.append((a - a % ole.sector_size,
+                                     min((a - a % ole.sector_size)
+                                         + ole.sector_size, ole._filesize)))
+            unrelated = 0
+            for item in plan.ranges:
+                start, end = item.offset, item.stop
+                covered = [(max(start, a), min(end, b))
+                           for a, b in sector_spans if a < end and start < b]
+                covered.sort()
+                cursor = start
+                for a, b in covered:
+                    if a > cursor:
+                        unrelated += a - cursor
+                    cursor = max(cursor, b)
+                unrelated += end - cursor
+            self.assertEqual(plan.extra_bytes, unrelated)
+
+    def test_budget_bounds_extra_bytes(self):
+        """The planned overhead never exceeds the caller budget."""
+        names = ['WordDocument', '1Table',
+                 '\x05SummaryInformation', '\x01CompObj']
+        with olefile.OleFileIO(self.ole_file) as ole:
+            expected = self._stream_bytes(ole, names)
+            unlimited = ole.plan_stream_reads(names).read_count
+            for budget in (0, 100, 1000, 5000):
+                plan = ole.plan_stream_reads(names, budget=budget)
+                self.assertLessEqual(plan.extra_bytes, budget)
+                assembled = plan.fetch()
+                for name in names:
+                    self.assertEqual(assembled[name], expected[tuple(name)])
+                self.assertGreaterEqual(plan.read_count, unlimited)
+            # With no budget the plan must never use more extra bytes than
+            # needed to make the whole span contiguous.
+            self.assertEqual(unlimited, 1)
+
+    def test_zero_budget_does_not_read_gaps(self):
+        """A zero budget must not read unrelated gap sectors."""
+        names = ['WordDocument', '1Table',
+                 '\x05SummaryInformation', '\x01CompObj']
+        with olefile.OleFileIO(self.ole_file) as ole:
+            plan = ole.plan_stream_reads(names, budget=0)
+            self.assertEqual(plan.extra_bytes, 0)
+            # Two runs of mandatory sectors, separated by unrelated sectors.
+            self.assertEqual(plan.read_count, 2)
+
+    def test_stream_assembly_order_and_read_indices(self):
+        """Each stream's pieces follow its logical byte order."""
+        names = ['WordDocument', '1Table', '\x01CompObj']
+        with olefile.OleFileIO(self.ole_file) as ole:
+            plan = ole.plan_stream_reads(names)
+            for name in names:
+                stream_plan = plan.stream(name)
+                self.assertEqual(stream_plan.size,
+                                 len(ole.openstream(name).read()))
+                self.assertEqual(
+                    sum(piece.length for piece in stream_plan.pieces),
+                    stream_plan.size)
+                for piece in stream_plan.pieces:
+                    read = plan.ranges[piece.read_index]
+                    self.assertLessEqual(piece.end, read.length)
+
+    def test_forbidden_gap_splits_reads(self):
+        """A forbidden gap between two streams must not be crossed."""
+        names = ['WordDocument', '1Table',
+                 '\x05SummaryInformation', '\x01CompObj']
+        with olefile.OleFileIO(self.ole_file) as ole:
+            expected = self._stream_bytes(ole, names)
+            # This gap lies between 1Table and SummaryInformation.
+            gap = (11054, 11264)
+            plan = ole.plan_stream_reads(names, budget=100000,
+                                         forbidden=[gap])
+            for item in plan.ranges:
+                self.assertFalse(item.intersects(*gap))
+            assembled = plan.fetch()
+            for name in names:
+                self.assertEqual(assembled[name], expected[tuple(name)])
+
+    def test_forbidden_stream_bytes_are_rejected(self):
+        """A forbidden range covering stream data makes the plan impossible."""
+        with olefile.OleFileIO(self.ole_file) as ole:
+            # WordDocument starts at physical offset 512.
+            with self.assertRaises(olefile.ReadPlanError):
+                ole.plan_stream_reads(['WordDocument'],
+                                      forbidden=[(600, 700)])
+
+    def test_forbidden_across_two_streams_is_rejected(self):
+        """Forbidding the range between two streams does not hide data."""
+        with olefile.OleFileIO(self.ole_file) as ole:
+            with self.assertRaises(olefile.ReadPlanError):
+                ole.plan_stream_reads(
+                    ['WordDocument', '1Table'],
+                    forbidden=[(1000, 4200)])
+
+    def test_read_plan_from_path(self):
+        """The module-level helper closes the file but keeps the plan usable."""
+        names = ['WordDocument', '1Table']
+        plan = olefile.plan_stream_reads(self.ole_file, names, budget=0)
+        self.assertEqual(plan.budget, 0)
+        with open(self.ole_file, 'rb') as handle:
+            assembled = plan.fetch(handle)
+        with olefile.OleFileIO(self.ole_file) as ole:
+            for name in names:
+                self.assertEqual(assembled[name],
+                                 ole.openstream(name).read())
+
+    def test_empty_stream_needs_no_read(self):
+        """A zero-length stream contributes no physical read."""
+        with olefile.OleFileIO(self.ole_file) as ole:
+            # The sample file has no empty stream; use a data window instead:
+            # requesting no stream yields no read at all.
+            plan = ole.plan_stream_reads([])
+            self.assertEqual(plan.ranges, ())
+            self.assertEqual(plan.extra_bytes, 0)
+
+    def test_duplicate_names_count_once(self):
+        """Repeating a stream name must not duplicate reads or pieces."""
+        with olefile.OleFileIO(self.ole_file) as ole:
+            plan = ole.plan_stream_reads(
+                ['WordDocument', 'WordDocument', 'worddocument'])
+            self.assertEqual(len(plan.streams), 1)
+            self.assertEqual(plan.read_count, 1)
+
+    def test_plan_is_case_insensitive(self):
+        """Stream lookup follows openstream()'s case-insensitive behaviour."""
+        with olefile.OleFileIO(self.ole_file) as ole:
+            plan = ole.plan_stream_reads(['worddocument'])
+            self.assertEqual(plan.streams['WordDocument'].size,
+                             ole.get_size('WordDocument'))
+
+
+class TestPlanStreamReadsLayouts(unittest.TestCase):
+    """Read planning on synthetic, deliberately fragmented layouts."""
+
+    def setUp(self):
+        from tests.fixtures.ole_builder import build_ole
+        self.build_ole = build_ole
+        self.tmpdir = os.path.join(_thismodule_dir, '.plan-tmp')
+        if not os.path.isdir(self.tmpdir):
+            os.makedirs(self.tmpdir)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _build(self, name, streams, order):
+        path = os.path.join(self.tmpdir, name)
+        self.build_ole(path, streams, order)
+        return path
+
+    def test_fragmented_fat_streams(self):
+        """Interleaved FAT chains are rebuilt from the cheapest reads."""
+        streams = {'Alpha': b'A' * 5120, 'Beta': b'B' * 4096,
+                   'Gamma': b'C' * 2560}
+        remaining = {'Alpha': 10, 'Beta': 8, 'Gamma': 5}
+        order = []
+        while any(remaining.values()):
+            for name in ('Alpha', 'Beta', 'Gamma'):
+                if remaining[name]:
+                    order.append('free')
+                    order.append(('stream', name))
+                    remaining[name] -= 1
+        path = self._build('fragmented.ole', streams, order)
+        with olefile.OleFileIO(path) as ole:
+            names = list(streams)
+            expected = dict((name, ole.openstream(name).read())
+                            for name in names)
+            for budget in (0, 512, 2000, 100000):
+                plan = ole.plan_stream_reads(names, budget=budget)
+                self.assertLessEqual(plan.extra_bytes, budget)
+                assembled = plan.fetch()
+                for name in names:
+                    self.assertEqual(assembled[name], expected[name])
+            zero = ole.plan_stream_reads(names, budget=0)
+            self.assertEqual(zero.extra_bytes, 0)
+            self.assertGreater(zero.read_count, 1)
+            unlimited = ole.plan_stream_reads(names)
+            self.assertEqual(unlimited.read_count, 1)
+
+    def test_minifat_streams(self):
+        """MiniFAT streams map to physical offsets inside the mini stream."""
+        streams = {'Small1': bytes(range(256)) * 6,
+                   'Small2': b'S' * 700,
+                   'Small3': b'T' * 600}
+        order = [('stream', 'Small1'), ('stream', 'Small2'),
+                 ('stream', 'Small1'), ('stream', 'Small3'),
+                 ('stream', 'Small2'), ('stream', 'Small1'),
+                 ('stream', 'Small3')]
+        path = self._build('mini.ole', streams, dict(order))
+        with olefile.OleFileIO(path) as ole:
+            names = list(streams)
+            expected = dict((name, ole.openstream(name).read())
+                            for name in names)
+            plan = ole.plan_stream_reads(names, budget=0)
+            self.assertEqual(plan.extra_bytes, 0)
+            # The two small streams share sectors only within the ministream.
+            for piece in plan.streams['Small1'].pieces:
+                self.assertLess(piece.length, ole.minisectorcutoff)
+            assembled = plan.fetch()
+            for name in names:
+                self.assertEqual(assembled[name], expected[name])
+
+    def test_shared_physical_chain_counts_once(self):
+        """Two directory entries pointing at one chain are read once."""
+        import struct
+        streams = {'One': b'1' * 5120, 'Two': b'2' * 5120}
+        order = [('stream', 'One')] * 10 + [('stream', 'Two')] * 10
+        path = self._build('shared.ole', streams, order)
+        with open(path, 'rb') as handle:
+            data = bytearray(handle.read())
+        # Directory sector is the one before the FAT; find it from the header.
+        first_dir = struct.unpack_from('<I', data, 48)[0]
+        dir_offset = (first_dir + 1) * 512
+        # Entry 2 starts at +256; patch its start sector and size to entry 1.
+        first_stream = struct.unpack_from('<I', data,
+                                          dir_offset + 128 + 116)[0]
+        struct.pack_into('<I', data, dir_offset + 256 + 116, first_stream)
+        struct.pack_into('<I', data, dir_offset + 256 + 120, 5120)
+        with open(path, 'wb') as handle:
+            handle.write(bytes(data))
+        with olefile.OleFileIO(path) as ole:
+            self.assertEqual(ole.openstream('One').read(),
+                             ole.openstream('Two').read())
+            plan = ole.plan_stream_reads(['One', 'Two'], budget=0)
+            self.assertEqual(plan.read_count, 1)
+            self.assertEqual(plan.extra_bytes, 0)
+            assembled = plan.fetch()
+            self.assertEqual(assembled['One'], ole.openstream('One').read())
+            self.assertEqual(assembled['Two'], ole.openstream('Two').read())
+
+    def test_streams_in_same_sector_read_once(self):
+        """Two small streams packed in one physical sector need one read."""
+        streams = {'Tiny1': b'x' * 64, 'Tiny2': b'y' * 32}
+        path = self._build('same-sector.ole', streams, [])
+        with olefile.OleFileIO(path) as ole:
+            plan = ole.plan_stream_reads(['Tiny1', 'Tiny2'], budget=0)
+            self.assertEqual(plan.read_count, 1)
+            self.assertEqual(len(plan.ranges), 1)
+            self.assertEqual(plan.ranges[0].length, ole.sector_size)
+            self.assertEqual(plan.extra_bytes, 0)
+            self.assertEqual(plan.streams['Tiny1'].read_indices, (0,))
+            self.assertEqual(plan.streams['Tiny2'].read_indices, (0,))
+            assembled = plan.fetch()
+            self.assertEqual(assembled['Tiny1'], streams['Tiny1'])
+            self.assertEqual(assembled['Tiny2'], streams['Tiny2'])
+
+    def test_forbidden_gap_never_crossed(self):
+        """Forbidden interior bytes split reads even when budget is unlimited."""
+        streams = {'Left': b'L' * 5120, 'Right': b'R' * 5120}
+        order = [('stream', 'Left')] * 10 + ['free'] * 2 \
+            + [('stream', 'Right')] * 10
+        path = self._build('forbidden.ole', streams, order)
+        with olefile.OleFileIO(path) as ole:
+            left = ole.openstream('Left').read()
+            right = ole.openstream('Right').read()
+            # Two free sectors sit between the streams; that whole gap is
+            # forbidden, so the plan must read the two streams separately.
+            span = ((1 + 10) * 512, (1 + 12) * 512)
+            plan = ole.plan_stream_reads(['Left', 'Right'],
+                                         forbidden=[span])
+            for item in plan.ranges:
+                self.assertFalse(item.intersects(*span))
+            assembled = plan.fetch()
+            self.assertEqual(assembled['Left'], left)
+            self.assertEqual(assembled['Right'], right)

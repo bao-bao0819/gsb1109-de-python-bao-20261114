@@ -262,6 +262,52 @@ The following example extracts the "Pictures" stream from a PPT file:
     pics = ole.openstream('Pictures')
     data = pics.read()
 
+Plan batched physical reads
+---------------------------
+
+Opening many streams one by one seeks to each stream sector separately. When
+the container is on slow or remote storage, it is often better to read a few
+contiguous byte ranges that cover all wanted streams at once.
+
+:py:meth:`olefile.OleFileIO.plan_stream_reads` maps every requested stream to
+the physical bytes it really occupies (through the FAT or MiniFAT chains) and
+returns a :py:class:`olefile.ReadPlan`:
+
+::
+
+    names = ['WordDocument', '1Table', '\x05SummaryInformation']
+    plan = ole.plan_stream_reads(names, budget=4096)
+    for item in plan.ranges:
+        print('read', item.offset, item.length)
+    for name, stream_plan in plan.streams.items():
+        print(name, stream_plan.pieces)
+    streams = plan.fetch()
+    assert streams['WordDocument'] == ole.openstream('WordDocument').read()
+
+``budget`` limits the total number of extra bytes: bytes that are read while
+joining two pieces but belong to none of the requested streams. The planner
+joins the cheapest gaps first, so the number of physical reads is the smallest
+possible for that budget; with the default ``budget=None`` it reads the whole
+span from the first to the last wanted byte in one go. Streams sharing the
+same physical sectors are read once and both plans point at that read.
+
+Pass ``forbidden`` to protect byte ranges that must not be read at all, for
+example a gap the caller is not allowed to touch::
+
+    plan = ole.plan_stream_reads(names, budget=0,
+                                 forbidden=[(11054, 11264)])
+
+A read never contains or crosses a forbidden range. If a requested stream
+itself overlaps a forbidden range, the plan is impossible and
+:py:class:`olefile.ReadPlanError` is raised instead of silently reading it.
+
+:py:meth:`olefile.ReadPlan.fetch` performs the planned reads on the current
+handle and returns the assembled streams, in the same order as requested. Each
+:py:class:`olefile.StreamReadPlan` lists its pieces in stream byte order;
+:py:meth:`olefile.StreamReadPlan.assemble` can rebuild one stream from a list
+of read blobs. The module-level :py:func:`olefile.plan_stream_reads` helper
+accepts a filename and closes it after planning.
+
 Get information about a stream/storage
 --------------------------------------
 

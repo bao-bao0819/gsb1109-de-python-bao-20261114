@@ -98,12 +98,16 @@ __all__ = ['isOleFile', 'OleFileIO', 'OleMetadata', 'enable_logging',
            'DEFECT_FATAL', 'DEFAULT_PATH_ENCODING',
            'MAXREGSECT', 'DIFSECT', 'FATSECT', 'ENDOFCHAIN', 'FREESECT',
            'MAXREGSID', 'NOSTREAM', 'UNKNOWN_SIZE', 'WORD_CLSID',
-           'OleFileIONotClosed'
+           'OleFileIONotClosed', 'ReadRange', 'StreamPiece',
+           'StreamReadPlan', 'ReadPlan', 'ReadPlanError',
+           'plan_stream_reads', 'read_streams'
 ]
 
 import io
 import sys
 import struct, array, os.path, datetime, logging, warnings, traceback
+import bisect
+from collections import namedtuple, OrderedDict
 
 #=== COMPATIBILITY WORKAROUNDS ================================================
 
@@ -575,6 +579,398 @@ class OleFileIONotClosed(RuntimeWarning):
                            self.stack_of_open.format())
         else:
             return msg
+
+
+# --- Read planning -----------------------------------------------------------
+
+class ReadPlanError(OleFileError):
+    """
+    Raised when a set of streams cannot be extracted with the requested
+    read budget and forbidden ranges.
+    """
+
+
+class ReadRange(namedtuple('_ReadRange', 'offset length')):
+    """
+    A contiguous physical read: ``length`` bytes starting at byte ``offset``
+    in the OLE container.
+    """
+    __slots__ = ()
+
+    def __new__(cls, offset, length):
+        if offset < 0 or length < 0:
+            raise ValueError('read offsets and lengths must be non-negative')
+        return super(ReadRange, cls).__new__(cls, int(offset), int(length))
+
+    @property
+    def start(self):
+        """Alias for offset."""
+        return self.offset
+
+    @property
+    def stop(self):
+        """Byte offset just after this range."""
+        return self.offset + self.length
+
+    #: end is commonly used together with start
+    end = stop
+
+    @property
+    def size(self):
+        """Alias for length."""
+        return self.length
+
+    @classmethod
+    def from_span(cls, start, end):
+        """Build a range from absolute start/end byte offsets."""
+        if end < start:
+            raise ValueError('end must not be smaller than start')
+        return cls(start, end - start)
+
+    def intersects(self, start, end):
+        """Return True if this range overlaps ``[start, end)``."""
+        return self.offset < end and start < self.stop
+
+    def __repr__(self):
+        return 'ReadRange(offset=%d, length=%d)' % (self.offset, self.length)
+
+
+class StreamPiece(namedtuple('_StreamPiece', 'read_index offset length')):
+    """
+    One piece of a stream in assembly order.
+
+    ``read_index`` selects an entry of :attr:`ReadPlan.ranges`, ``offset`` is
+    the position inside that read and ``length`` is the number of stream bytes
+    taken from it.
+    """
+    __slots__ = ()
+
+    def __new__(cls, read_index, offset, length):
+        if read_index < 0 or offset < 0 or length < 0:
+            raise ValueError('stream piece values must be non-negative')
+        return super(StreamPiece, cls).__new__(
+            cls, int(read_index), int(offset), int(length))
+
+    @property
+    def end(self):
+        """Offset just after this piece inside the physical read."""
+        return self.offset + self.length
+
+    @property
+    def read(self):
+        """Alias for read_index."""
+        return self.read_index
+
+    @property
+    def index(self):
+        """Alias for read_index."""
+        return self.read_index
+
+    @property
+    def size(self):
+        """Alias for length."""
+        return self.length
+
+    @property
+    def start(self):
+        """Alias for offset inside the physical read."""
+        return self.offset
+
+    def __repr__(self):
+        return 'StreamPiece(read_index=%d, offset=%d, length=%d)' % (
+            self.read_index, self.offset, self.length)
+
+
+class StreamReadPlan(namedtuple('_StreamReadPlan', 'name size pieces')):
+    """
+    Assembly plan for one stream.
+
+    :attr:`name` is the stream path as a tuple of components, :attr:`size` is
+    its declared size and :attr:`pieces` lists :class:`StreamPiece` objects in
+    stream byte order.
+    """
+    __slots__ = ()
+
+    def __new__(cls, name, size, pieces):
+        if isinstance(name, basestring):
+            name = name.split('/')
+        return super(StreamReadPlan, cls).__new__(
+            cls, tuple(name), int(size), tuple(pieces))
+
+    @property
+    def path(self):
+        """Tuple path of this stream."""
+        return self.name
+
+    @property
+    def parts(self):
+        """Alias for pieces."""
+        return self.pieces
+
+    #: assembly is an explicit alias for the ordered piece list
+    assembly = parts
+
+    @property
+    def read_indices(self):
+        """Physical reads used by this stream, in first-use order."""
+        seen = []
+        for piece in self.pieces:
+            if piece.read_index not in seen:
+                seen.append(piece.read_index)
+        return tuple(seen)
+
+    #: aliases used by callers to describe the assembly order
+    segments = property(lambda self: self.pieces)
+    chunks = property(lambda self: self.pieces)
+    order = property(lambda self: self.pieces)
+
+    def __len__(self):
+        return len(self.pieces)
+
+    def __iter__(self):
+        return iter(self.pieces)
+
+    def __getitem__(self, index):
+        return self.pieces[index]
+
+    def physical(self, reads):
+        """
+        Return the assembly order as absolute ``(offset, length)`` extents.
+
+        :param reads: the :class:`ReadPlan` ranges (or any indexable
+            sequence of :class:`ReadRange`).
+        """
+        return tuple((reads[piece.read_index].offset + piece.offset,
+                      piece.length) for piece in self.pieces)
+
+    def physical_pieces(self, reads):
+        """Alias for :meth:`physical`."""
+        return self.physical(reads)
+
+    def assemble(self, blobs):
+        """
+        Rebuild the stream bytes from physical read blobs.
+
+        :param blobs: sequence indexed by read index, or mapping from read
+            index to bytes.
+        """
+        result = []
+        for piece in self.pieces:
+            data = blobs[piece.read_index]
+            if len(data) < piece.end:
+                raise ReadPlanError(
+                    'read %d is shorter than planned (%d < %d)'
+                    % (piece.read_index, len(data), piece.end))
+            result.append(data[piece.offset:piece.end])
+        return b''.join(result)
+
+    def __repr__(self):
+        return 'StreamReadPlan(name=%r, size=%d, pieces=%d)' % (
+            self.name, self.size, len(self.pieces))
+
+
+class _PathDict(OrderedDict):
+    """
+    Mapping keyed by tuple paths that also accepts strings and lists.
+
+    Lookups are case-insensitive, like the rest of olefile's stream API.
+    """
+    @staticmethod
+    def _normalize(key):
+        if isinstance(key, basestring):
+            return tuple(key.split('/'))
+        return tuple(key)
+
+    def _find_key(self, key):
+        normalized = self._normalize(key)
+        if OrderedDict.__contains__(self, normalized):
+            return normalized
+        lowered = tuple(part.lower() for part in normalized)
+        for existing in OrderedDict.__iter__(self):
+            if tuple(part.lower() for part in existing) == lowered:
+                return existing
+        return normalized
+
+    def __getitem__(self, key):
+        return OrderedDict.__getitem__(self, self._find_key(key))
+
+    def __contains__(self, key):
+        return OrderedDict.__contains__(self, self._find_key(key))
+
+    def get(self, key, default=None):
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def __setitem__(self, key, value):
+        OrderedDict.__setitem__(self, self._normalize(key), value)
+
+
+class ReadPlan(object):
+    """
+    Result of :meth:`OleFileIO.plan_stream_reads`.
+
+    The plan contains a minimal list of contiguous physical reads (subject to
+    the extra-byte budget and forbidden ranges) and, for every requested
+    stream, the ordered pieces needed to rebuild it.
+
+    Attributes:
+
+        - ranges: tuple of :class:`ReadRange` in ascending physical order.
+        - streams: ordered mapping of tuple path to :class:`StreamReadPlan`.
+        - extra_bytes: number of bytes read between streams, i.e. bytes that
+          are not part of any requested stream. This value is at most
+          ``budget``.
+        - budget: the caller-provided extra-byte budget (or None).
+        - forbidden: normalized tuple of forbidden :class:`ReadRange`.
+    """
+    def __init__(self, ranges, streams, extra_bytes, budget,
+                 forbidden=(), source=None):
+        self.ranges = tuple(ranges)
+        #: aliases used by different callers
+        self.reads = self.ranges
+        self.read_ranges = self.ranges
+        self.chunks = self.ranges
+        self.intervals = self.ranges
+        self.streams = _PathDict()
+        for stream_plan in streams:
+            self.streams[stream_plan.name] = stream_plan
+        self.extra_bytes = int(extra_bytes)
+        self.overhead_bytes = self.extra_bytes
+        self.budget = budget
+        self.forbidden = tuple(forbidden)
+        self._source = source
+
+    # -- sequence-like access ------------------------------------------------
+    def __len__(self):
+        return len(self.ranges)
+
+    def __iter__(self):
+        return iter(self.ranges)
+
+    def __getitem__(self, index):
+        return self.ranges[index]
+
+    @property
+    def read_count(self):
+        """Number of physical read operations (locates)."""
+        return len(self.ranges)
+
+    #: explicit aliases for the number of seeks/locates
+    locate_count = read_count
+    seek_count = read_count
+    count = read_count
+
+    @property
+    def total_bytes(self):
+        """Total number of bytes covered by all physical reads."""
+        return sum(item.length for item in self.ranges)
+
+    @property
+    def bytes(self):
+        """Alias for total_bytes."""
+        return self.total_bytes
+
+    def stream(self, name):
+        """Return the :class:`StreamReadPlan` for ``name``."""
+        return self.streams[name]
+
+    def read_count_for(self, name):
+        """Number of physical reads used by one stream."""
+        return len(self.stream(name).read_indices)
+
+    def assembly_order(self):
+        """Return an ordered mapping path -> tuple of StreamPiece."""
+        return _PathDict((name, plan.pieces)
+                         for name, plan in self.streams.items())
+
+    def physical_order(self):
+        """Return an ordered mapping path -> absolute (offset, length) tuple."""
+        return _PathDict((name, plan.physical(self.ranges))
+                         for name, plan in self.streams.items())
+
+    #: aliases for the per-stream assembly information
+    parts = property(lambda self: self.assembly_order())
+    order = property(lambda self: self.streams)
+    stream_plans = property(lambda self: self.streams)
+
+    def __contains__(self, name):
+        return name in self.streams
+
+    def assemble(self, blobs):
+        """
+        Rebuild all streams from physical read blobs.
+
+        :param blobs: sequence or mapping of bytes indexed like ``ranges``.
+        :returns: ordered mapping of tuple path to stream bytes.
+        """
+        result = _PathDict()
+        for name, stream_plan in self.streams.items():
+            result[name] = stream_plan.assemble(blobs)
+        return result
+
+    def fetch(self, fp=None):
+        """
+        Perform the physical reads and return the assembled streams.
+
+        :param fp: seekable binary file. When omitted, the source used to
+            create the plan is used (the OleFileIO handle is not closed).
+        """
+        if fp is None:
+            if self._source is None:
+                raise ValueError('a file object is required to fetch this plan')
+            fp = self._source.fp
+            if fp.closed:
+                raise OSError('Attempting to read from a closed OLE File')
+        blobs = []
+        old_position = None
+        try:
+            old_position = fp.tell()
+        except Exception:
+            old_position = None
+        try:
+            for item in self.ranges:
+                fp.seek(item.offset)
+                data = fp.read(item.length)
+                if len(data) != item.length:
+                    raise ReadPlanError(
+                        'short physical read at %d: expected %d, got %d'
+                        % (item.offset, item.length, len(data)))
+                blobs.append(data)
+        finally:
+            if old_position is not None:
+                try:
+                    fp.seek(old_position)
+                except Exception:
+                    pass
+        return self.assemble(blobs)
+
+    #: convenient spellings for applying a plan
+    read = fetch
+    execute = fetch
+    apply = fetch
+
+    def as_dict(self):
+        """Return a JSON-friendly representation of the plan."""
+        return {
+            'ranges': [{'offset': item.offset, 'length': item.length}
+                       for item in self.ranges],
+            'extra_bytes': self.extra_bytes,
+            'budget': self.budget,
+            'streams': OrderedDict(
+                (name, {'size': plan.size,
+                        'pieces': [{'read_index': piece.read_index,
+                                    'offset': piece.offset,
+                                    'length': piece.length}
+                                   for piece in plan.pieces]})
+                for name, plan in self.streams.items()),
+        }
+
+    def __repr__(self):
+        return 'ReadPlan(reads=%d, extra_bytes=%d, streams=%d)' % (
+            len(self.ranges), self.extra_bytes, len(self.streams))
+
 
 
 # --- OleStream ---------------------------------------------------------------
@@ -1969,6 +2365,352 @@ class OleFileIO:
             raise IOError("this file is not a stream")
         return self._open(entry.isectStart, entry.size)
 
+    def _stream_mapping(self, name):
+        """
+        Map one stream's logical bytes to physical container ranges.
+
+        :param name: stream path (string or sequence of components)
+        :returns: tuple of ``(canonical_name, size, extents)``, where
+            canonical_name is the tuple path spelled as in the directory and
+            each extent is ``(logical_offset, physical_offset, length)``.
+        """
+        sid = self._find(name)
+        entry = self.direntries[sid]
+        if entry.entry_type != STGTY_STREAM:
+            raise IOError("this file is not a stream")
+        canonical = tuple(entry.name.split('/')) \
+            if isinstance(entry.name, basestring) else tuple(entry.name)
+        size = entry.size
+        if size == 0:
+            return canonical, 0, ()
+        if entry.is_minifat:
+            if not self.minifat:
+                self.loadminifat()
+            chain = self._sector_chain(entry.isectStart, self.minifat)
+            block_size = self.sector_size // self.mini_sector_size
+            extents = []
+            remaining = size
+            logical = 0
+            root_chain = self._sector_chain(self.root.isectStart, self.fat)
+            for mini_sector in chain:
+                if logical >= size:
+                    break
+                take = min(self.mini_sector_size, remaining)
+                root_index = mini_sector // block_size
+                mini_index = mini_sector % block_size
+                if root_index >= len(root_chain):
+                    self._raise_defect(
+                        DEFECT_INCORRECT,
+                        'MiniFAT sector index out of range')
+                    break
+                physical = ((root_chain[root_index] + 1) * self.sector_size
+                            + mini_index * self.mini_sector_size)
+                extents.append((logical, physical, take))
+                logical += take
+                remaining -= take
+            return canonical, size, tuple(extents)
+        chain = self._sector_chain(entry.isectStart, self.fat)
+        extents = []
+        remaining = size
+        logical = 0
+        for sector in chain:
+            if logical >= size:
+                break
+            take = min(self.sector_size, remaining)
+            physical = (sector + 1) * self.sector_size
+            extents.append((logical, physical, take))
+            logical += take
+            remaining -= take
+        return canonical, size, tuple(extents)
+
+    def _sector_chain(self, start, fat):
+        """
+        Follow a sector chain, with the same loop protection as OleStream.
+        """
+        chain = []
+        seen = set()
+        sector = start
+        limit = len(fat)
+        while sector not in (ENDOFCHAIN, FREESECT):
+            if sector < 0 or sector >= limit:
+                self._raise_defect(
+                    DEFECT_INCORRECT,
+                    'incorrect OLE FAT, sector index out of range')
+                break
+            if sector in seen:
+                self._raise_defect(
+                    DEFECT_INCORRECT, 'incorrect OLE FAT, sector loop')
+                break
+            seen.add(sector)
+            chain.append(sector)
+            sector = fat[sector] & 0xFFFFFFFF
+        return chain
+
+    def plan_stream_reads(self, names, budget=None, forbidden=None):
+        """
+        Build a minimal contiguous-read plan for several streams.
+
+        Every stream is mapped to the physical byte ranges it actually
+        occupies, following the FAT or MiniFAT sector chain and translating
+        mini-sectors into offsets inside the container. Overlapping or
+        adjacent ranges are one physical interval and need only one read, so
+        two streams sharing sectors (or one stream nested in another's range)
+        do not cost two locates.
+
+        Ranges that are separated by unrelated bytes may still be read as one
+        contiguous interval; the unrelated bytes between them are the extra
+        reads and all of them together must fit in ``budget``. The planner
+        bridges the cheapest gaps first, which gives the fewest reads for the
+        budget; with ``budget=None`` the whole span from the first to the
+        last wanted byte is read in one go.
+
+        ``forbidden`` byte spans are never read and never crossed. If a
+        requested stream byte itself lies in a forbidden span, the plan is
+        impossible and :class:`ReadPlanError` is raised. A forbidden span in
+        the gap between two ranges simply prevents that gap from being bridged.
+
+        :param names: iterable of stream paths (strings or component lists).
+        :param budget: maximum total number of extra bytes that may be read,
+            or None for unlimited.
+        :param forbidden: forbidden byte spans, each an ``(start, end)``
+            pair or a :class:`ReadRange`, or a single such value.
+        :returns: :class:`ReadPlan`
+        """
+        if isinstance(names, (basestring, bytes)):
+            names = [names]
+        # Repeating a stream (case-insensitively, like openstream) must not
+        # produce duplicate pieces or reads.
+        unique = set()
+        deduped = []
+        for name in names:
+            if isinstance(name, bytes):
+                name = name.decode(self.path_encoding or 'utf-8')
+            normalized = (tuple(name.split('/'))
+                          if isinstance(name, basestring) else tuple(name))
+            key = tuple(part.lower() for part in normalized)
+            if key not in unique:
+                unique.add(key)
+                deduped.append(normalized)
+        names = deduped
+        forbidden_spans = self._normalize_forbidden(forbidden)
+        if budget is not None:
+            budget = int(budget)
+            if budget < 0:
+                raise ValueError('budget must be non-negative')
+
+        sector_size = self.sector_size
+        # Collect the physical extents of every requested stream.
+        streams = []
+        required = set()
+        for name in names:
+            canonical, size, extents = self._stream_mapping(name)
+            stream_extents = []
+            for logical, physical, length in extents:
+                if length <= 0:
+                    continue
+                end = physical + length
+                if self._spans_intersect(physical, end, forbidden_spans):
+                    raise ReadPlanError(
+                        'stream %r covers forbidden byte range [%d, %d)'
+                        % (canonical, physical, end))
+                # Storage is read by physical sector: a stream byte implies
+                # its whole sector. Two streams sharing a sector therefore
+                # need only one read, and a sector is never read twice.
+                sector_start = physical - physical % sector_size
+                sector_end = min(sector_start + sector_size, self._filesize)
+                required.add((sector_start, sector_end))
+                stream_extents.append((logical, physical, end, length))
+            streams.append([canonical, size, stream_extents])
+
+        # Union of the required sectors. Touching sectors are contiguous and
+        # therefore cost no extra byte.
+        mandatory = []
+        for extent in sorted(required):
+            if mandatory and extent[0] <= mandatory[-1][1]:
+                if extent[1] > mandatory[-1][1]:
+                    mandatory[-1][1] = extent[1]
+            else:
+                mandatory.append([extent[0], extent[1]])
+
+        # Bytes of a required sector may themselves be forbidden. Reading
+        # such a sector exactly up to the protected bytes is still valid; the
+        # plan simply reports the shorter allowed extent.
+        if forbidden_spans:
+            allowed = []
+            for start, end in mandatory:
+                allowed.extend(self._allowed_segments(start, end,
+                                                      forbidden_spans))
+            mandatory = []
+            for start, end in allowed:
+                if mandatory and start <= mandatory[-1][1]:
+                    if end > mandatory[-1][1]:
+                        mandatory[-1][1] = end
+                else:
+                    mandatory.append([start, end])
+
+        # Bridging a gap reads bytes belonging to no requested stream. Gaps
+        # containing forbidden bytes can never be bridged; all other gaps are
+        # independent, so taking the cheapest ones maximizes merges and thus
+        # minimizes the number of reads within the budget.
+        gap_candidates = []
+        for index in range(len(mandatory) - 1):
+            gap_start = mandatory[index][1]
+            gap_end = mandatory[index + 1][0]
+            if gap_end < gap_start:
+                raise ReadPlanError(
+                    'overlapping physical ranges for requested streams')
+            if self._spans_intersect(gap_start, gap_end, forbidden_spans):
+                continue
+            gap_candidates.append((gap_end - gap_start, index))
+        gap_candidates.sort()
+
+        joined = set()
+        extra_bytes = 0
+        for cost, index in gap_candidates:
+            if budget is not None and extra_bytes + cost > budget:
+                continue
+            extra_bytes += cost
+            joined.add(index)
+
+        final = []
+        for index, span in enumerate(mandatory):
+            if final and (index - 1) in joined:
+                final[-1][1] = span[1]
+            else:
+                final.append([span[0], span[1]])
+        spans = final
+        read_starts = [span[0] for span in spans]
+
+        plans = []
+        for name, size, stream_extents in streams:
+            pieces = []
+            for logical, physical, end, length in stream_extents:
+                cursor = physical
+                remaining = length
+                while remaining:
+                    read_index = bisect.bisect_right(read_starts, cursor) - 1
+                    if read_index < 0 or cursor >= spans[read_index][1]:
+                        raise ReadPlanError(
+                            'stream %r is not fully covered by planned reads'
+                            % (tuple(name.split('/'))
+                               if isinstance(name, basestring)
+                               else tuple(name),))
+                    take = min(remaining, spans[read_index][1] - cursor)
+                    pieces.append(StreamPiece(
+                        read_index, cursor - spans[read_index][0], take))
+                    cursor += take
+                    remaining -= take
+            pieces = self._merge_stream_pieces(pieces, stream_extents)
+            stream_plan = StreamReadPlan(name, size, pieces)
+            total = sum(piece.length for piece in pieces)
+            if total != size:
+                raise ReadPlanError(
+                    'stream %r is only partially covered' % (stream_plan.name,))
+            plans.append(stream_plan)
+
+        ranges = [ReadRange(start, end - start) for start, end in spans]
+        return ReadPlan(ranges, plans, extra_bytes, budget,
+                        forbidden_spans, source=self)
+
+    @staticmethod
+    def _allowed_segments(start, end, forbidden_spans):
+        """Return sub-segments of ``[start, end)`` outside forbidden spans."""
+        segments = []
+        cursor = start
+        for forbidden_start, forbidden_end in forbidden_spans:
+            if forbidden_end <= cursor:
+                continue
+            if forbidden_start >= end:
+                break
+            if forbidden_start > cursor:
+                segments.append((cursor, min(forbidden_start, end)))
+            cursor = max(cursor, forbidden_end)
+            if cursor >= end:
+                break
+        if cursor < end:
+            segments.append((cursor, end))
+        return segments
+
+    @staticmethod
+    def _merge_stream_pieces(pieces, stream_extents):
+        """Merge adjacent pieces that come from the same read."""
+        if not pieces:
+            return pieces
+        merged = [pieces[0]]
+        previous_extent = stream_extents[0]
+        for piece, extent in zip(pieces[1:], stream_extents[1:]):
+            previous = merged[-1]
+            same_read = previous.read_index == piece.read_index
+            adjacent_read = previous.offset + previous.length == piece.offset
+            adjacent_stream = (previous_extent[0] + previous_extent[3]
+                               == extent[0])
+            if same_read and adjacent_read and adjacent_stream:
+                merged[-1] = StreamPiece(
+                    previous.read_index, previous.offset,
+                    previous.length + piece.length)
+            else:
+                merged.append(piece)
+            previous_extent = extent
+        return merged
+
+    def read_streams(self, names, budget=None, forbidden=None):
+        """
+        Plan and execute a batched read, returning the assembled streams.
+
+        Equivalent to calling :meth:`plan_stream_reads` and then
+        :meth:`ReadPlan.fetch`. Returns an ordered mapping of tuple path to
+        bytes.
+        """
+        return self.plan_stream_reads(
+            names, budget=budget, forbidden=forbidden).fetch()
+
+    #: descriptive names for the same planner
+    plan_reads = plan_stream_reads
+    plan_batch_reads = plan_stream_reads
+    read_plan = plan_stream_reads
+    plan_stream_batch = plan_stream_reads
+
+    def _normalize_forbidden(self, forbidden):
+        """Normalize forbidden spans into a sorted, merged tuple."""
+        if forbidden is None:
+            return ()
+        if isinstance(forbidden, ReadRange):
+            forbidden = (forbidden,)
+        elif isinstance(forbidden, (tuple, list)) and len(forbidden) == 2 \
+                and all(isinstance(value, int) for value in forbidden):
+            forbidden = (forbidden,)
+        spans = []
+        for item in forbidden:
+            if isinstance(item, ReadRange):
+                start, end = item.offset, item.stop
+            else:
+                start, end = item[0], item[1]
+            start, end = int(start), int(end)
+            if start < 0 or end < 0 or end < start:
+                raise ValueError('invalid forbidden byte span')
+            if start != end:
+                spans.append((start, end))
+        spans.sort()
+        merged = []
+        for start, end in spans:
+            if merged and start <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+        return tuple(merged)
+
+    @staticmethod
+    def _spans_intersect(start, end, spans):
+        """Return True if ``[start, end)`` touches any span in ``spans``."""
+        if not spans or end <= start:
+            return False
+        starts = [span[0] for span in spans]
+        index = bisect.bisect_right(starts, start) - 1
+        if index >= 0 and spans[index][1] > start:
+            return True
+        index += 1
+        return index < len(spans) and spans[index][0] < end
+
     def _write_mini_stream(self, entry, data_to_write):
         if not entry.sect_chain:
             entry.build_sect_chain(self)
@@ -2538,6 +3280,56 @@ class OleFileIO:
             return data
 
         return data
+
+
+def read_streams(filename, names, budget=None, forbidden=None,
+                 raise_defects=DEFECT_FATAL):
+    """
+    Plan and execute a batched read from an OLE file.
+
+    Convenience wrapper returning the assembled stream bytes as an ordered
+    mapping of tuple path to bytes. ``filename`` may be a path, a file-like
+    object, or an already opened :class:`OleFileIO` instance; caller-owned
+    handles are left open.
+    """
+    if isinstance(filename, OleFileIO):
+        return filename.read_streams(names, budget=budget,
+                                     forbidden=forbidden)
+    ole = OleFileIO(filename, raise_defects=raise_defects)
+    try:
+        return ole.read_streams(names, budget=budget, forbidden=forbidden)
+    finally:
+        ole.close()
+
+
+def plan_stream_reads(filename, names, budget=None, forbidden=None,
+                      raise_defects=DEFECT_FATAL):
+    """
+    Build a minimal contiguous-read plan for several streams of an OLE file.
+
+    This is a convenience wrapper around
+    :meth:`OleFileIO.plan_stream_reads`; the OLE file is opened, the plan is
+    built, and the file is closed before returning. The returned
+    :class:`ReadPlan` therefore has no live source and :meth:`ReadPlan.fetch`
+    requires an explicit file object.
+
+    :param filename: path or file-like object accepted by :class:`OleFileIO`.
+    :param names: iterable of stream paths.
+    :param budget: maximum total extra bytes, or None for unlimited.
+    :param forbidden: iterable of forbidden ``(start, end)`` byte spans.
+    :returns: :class:`ReadPlan`
+    """
+    if isinstance(filename, OleFileIO):
+        return filename.plan_stream_reads(names, budget=budget,
+                                          forbidden=forbidden)
+    ole = OleFileIO(filename, raise_defects=raise_defects)
+    try:
+        plan = ole.plan_stream_reads(names, budget=budget,
+                                     forbidden=forbidden)
+        plan._source = None
+        return plan
+    finally:
+        ole.close()
 
 
 # --------------------------------------------------------------------
