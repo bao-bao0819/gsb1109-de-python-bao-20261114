@@ -193,3 +193,36 @@ interpreted in a special manner. **pyelftools** attempts to provide a
 convenient Pythonic API for this information whenever possible. There\'s
 no way around it - to even understand the API one must have some grasp
 of the [DWARF standard](https://dwarfstd.org/).
+
+#### Attributing line-table files to relocated source trees
+
+Line programs produced on a build machine store absolute paths in their
+directory table, while the archived source trees may live under
+different roots. `elftools.dwarf.sourceroots` interprets each file-table
+entry per compilation unit and directory index (1-based before DWARF v5,
+0-based in v5, where directory entry 0 is the compilation directory),
+then finds the source trees that explain the entries through one
+consistent directory-prefix mapping:
+
+```python
+from elftools.dwarf.sourceroots import SourceRootResolver
+
+resolver = SourceRootResolver(
+    source_roots=['/archive/tree-a', '/archive/tree-b'],
+    checksums={'src/main.c': '<hex digest>'})
+for resolution in resolver.resolve_dwarf_info(dwarfinfo):
+    for origin in resolution.origins:
+        # origin.status is 'unique', 'ambiguous' or 'unmatched';
+        # origin.sources holds every surviving candidate directory.
+        ...
+```
+
+A recorded file size (the legacy file-entry `length` field) and any
+supplied checksums are verified, so two trees that only share an
+identical README are not mistaken for a whole-tree match. When the
+available evidence cannot distinguish candidates, all of them are
+retained on the entry instead of guessing one. `ChecksumStore` accepts
+plain hex digests, explicit `(algorithm, digest)` pairs, tree-name
+prefixed keys, and checksum-file lines via `ChecksumStore.from_manifest`.
+A parsed line program header can also be resolved standalone with
+`resolve_sources`.
