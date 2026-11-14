@@ -1,7 +1,24 @@
 from random import uniform, randint
 import time
 
+import pytest
+
 import polyline
+
+
+def point_ranges(expression):
+    """Return the character range of every encoded point."""
+    ranges, index = [], 0
+    while index < len(expression):
+        start = index
+        for _ in range(2):
+            while True:
+                byte = ord(expression[index]) - 63
+                index += 1
+                if byte < 0x20:
+                    break
+        ranges.append((start, index))
+    return ranges
 
 
 def test_decode_multiple_points():
@@ -226,3 +243,203 @@ def test_a_variety_of_precisions():
     print(
         f"encoded and decoded {100 * okays / float(waypoints):.2f}% correctly for {waypoints} "
         f"waypoints @ {round(waypoints / patience, 0)} wp/sec")
+
+
+OFFICIAL_COORDS = [
+    (38.500, -120.200),
+    (40.700, -120.950),
+    (43.252, -126.453),
+    (44.000, -127.000),
+    (45.500, -128.250),
+    (46.000, -129.000),
+]
+
+
+def test_patch_single_point_replaces_only_affected_chunks():
+    expression = polyline.encode(OFFICIAL_COORDS)
+    old_ranges = point_ranges(expression)
+
+    result = polyline.patch(expression, [(1, 2, [(41.0, -121.0)])])
+    new_ranges = point_ranges(result.expression)
+
+    assert polyline.decode(result.expression) == [
+        (38.5, -120.2), (41.0, -121.0), (43.252, -126.453),
+        (44.0, -127.0), (45.5, -128.25), (46.0, -129.0),
+    ]
+    assert result.expression[:old_ranges[0][1]] == expression[:old_ranges[0][1]]
+    for point in (0, 3, 4, 5):
+        chunk = result.expression[new_ranges[point][0]:new_ranges[point][1]]
+        assert chunk == expression[old_ranges[point][0]:old_ranges[point][1]]
+    replaced = result.expression[new_ranges[1][0]:new_ranges[1][1]]
+    assert replaced != expression[old_ranges[1][0]:old_ranges[1][1]]
+    assert result.index[1] == new_ranges[1]
+
+
+def test_patch_reencodes_first_untouched_successor():
+    expression = polyline.encode(OFFICIAL_COORDS)
+    old_ranges = point_ranges(expression)
+
+    result = polyline.patch(expression, [(1, 2, [(41.0, -121.0)])])
+
+    successor = result.expression[result.index[2][0]:result.index[2][1]]
+    assert successor != expression[old_ranges[2][0]:old_ranges[2][1]]
+    assert polyline.decode(result.expression)[2] == (43.252, -126.453)
+
+
+def test_patch_longer_replacement_keeps_later_bytes_and_moves_index():
+    expression = polyline.encode(OFFICIAL_COORDS)
+    old_ranges = point_ranges(expression)
+    replacement = [(41.0, -121.0), (41.25, -121.1), (41.75, -121.5)]
+
+    result = polyline.patch(expression, [(1, 2, replacement)])
+
+    assert polyline.decode(result.expression) == [
+        (38.5, -120.2), (41.0, -121.0), (41.25, -121.1),
+        (41.75, -121.5), (43.252, -126.453), (44.0, -127.0),
+        (45.5, -128.25), (46.0, -129.0),
+    ]
+    for point in (3, 4, 5):
+        chunk = result.expression[result.index[point][0]:result.index[point][1]]
+        assert chunk == expression[old_ranges[point][0]:old_ranges[point][1]]
+    successor = result.expression[result.index[2][0]:result.index[2][1]]
+    assert successor != expression[old_ranges[2][0]:old_ranges[2][1]]
+    assert result.index[1] is not None
+
+
+def test_patch_batch_of_ranges_migrates_every_index_entry():
+    expression = polyline.encode(OFFICIAL_COORDS)
+    old_ranges = point_ranges(expression)
+    index = {f'stop{i}': char_range for i, char_range in enumerate(old_ranges)}
+
+    result = polyline.patch(
+        expression, [(1, 2, [(41.0, -121.0)]), (3, 4, [(44.5, -127.5)])], index=index)
+
+    assert polyline.decode(result.expression) == [
+        (38.5, -120.2), (41.0, -121.0), (43.252, -126.453),
+        (44.5, -127.5), (45.5, -128.25), (46.0, -129.0),
+    ]
+    for stop, char_range in result.index.items():
+        point = int(stop[len('stop'):])
+        assert char_range is not None
+        assert result.expression[char_range[0]:char_range[1]] == \
+            result.expression[point_ranges(result.expression)[point][0]:
+                              point_ranges(result.expression)[point][1]]
+
+
+def test_patch_insertion_at_boundaries():
+    expression = polyline.encode(OFFICIAL_COORDS)
+
+    head = polyline.patch(expression, [(0, 0, [(37.0, -119.0)])])
+    assert polyline.decode(head.expression)[0] == (37.0, -119.0)
+    assert polyline.decode(head.expression)[1] == (38.5, -120.2)
+
+    tail = polyline.patch(expression, [(6, 6, [(47.0, -130.0)])])
+    assert polyline.decode(tail.expression)[-1] == (47.0, -130.0)
+
+
+def test_patch_mapping_input_matches_tuple_input():
+    expression = polyline.encode(OFFICIAL_COORDS)
+
+    from_tuples = polyline.patch(expression, [(2, 3, [(42.0, -125.0)])])
+    from_mapping = polyline.patch(
+        expression, [{'start': 2, 'stop': 3, 'points': [(42.0, -125.0)]}])
+
+    assert from_tuples.expression == from_mapping.expression
+    assert from_tuples.index == from_mapping.index
+
+
+def test_patch_without_changes_preserves_expression():
+    expression = polyline.encode(OFFICIAL_COORDS)
+
+    result = polyline.patch(expression, [])
+
+    assert result.expression == expression
+    assert all(char_range is not None for char_range in result.index.values())
+
+
+def test_patch_geojson_reads_lon_lat():
+    expression = polyline.encode(OFFICIAL_COORDS)
+
+    result = polyline.patch(expression, [(1, 2, [(-121.0, 41.0)])], geojson=True)
+
+    assert polyline.decode(result.expression)[1] == (41.0, -121.0)
+    assert polyline.decode(expression) == OFFICIAL_COORDS
+
+
+def test_patch_precision_matches_encode():
+    expression = polyline.encode(OFFICIAL_COORDS, 6)
+    replacement = [(41.0, -121.0)]
+
+    result = polyline.patch(expression, [(1, 2, replacement)], precision=6)
+
+    assert polyline.decode(result.expression, 6)[1] == (41.0, -121.0)
+
+
+def test_patch_rejects_overlapping_ranges_atomically():
+    expression = polyline.encode(OFFICIAL_COORDS)
+    old_ranges = point_ranges(expression)
+
+    with pytest.raises(ValueError):
+        polyline.patch(expression, [(0, 3, [(1.0, 1.0)]), (2, 4, [(2.0, 2.0)])])
+
+    assert expression[old_ranges[1][0]:] == expression[old_ranges[1][0]:]
+
+
+def test_patch_rejects_duplicate_insertions_and_same_range():
+    expression = polyline.encode(OFFICIAL_COORDS)
+
+    with pytest.raises(ValueError):
+        polyline.patch(expression, [(2, 2, [(1.0, 1.0)]), (2, 2, [(2.0, 2.0)])])
+
+    with pytest.raises(ValueError):
+        polyline.patch(expression, [(1, 3, [(1.0, 1.0)]), (1, 3, [(2.0, 2.0)])])
+
+
+def test_patch_rejects_out_of_range_values():
+    expression = polyline.encode(OFFICIAL_COORDS)
+
+    with pytest.raises(ValueError):
+        polyline.patch(expression, [(4, 7, [(1.0, 1.0)])])
+
+    with pytest.raises(ValueError):
+        polyline.patch(expression, [(-1, 2, [(1.0, 1.0)])])
+
+    with pytest.raises(ValueError):
+        polyline.patch(expression, [(3, 2, [(1.0, 1.0)])])
+
+
+def test_patch_rejects_index_entries_off_point_boundaries():
+    expression = polyline.encode(OFFICIAL_COORDS)
+    old_ranges = point_ranges(expression)
+
+    with pytest.raises(ValueError):
+        polyline.patch(expression, [(1, 2, [])], index={'stop': (old_ranges[1][0] + 1, old_ranges[1][1])})
+
+    with pytest.raises(ValueError):
+        polyline.patch(expression, [(1, 2, [])], index={'stop': (old_ranges[1][0], len(expression) + 1)})
+
+
+def test_patch_index_entry_spanning_points_follows_survivors():
+    expression = polyline.encode(OFFICIAL_COORDS)
+    old_ranges = point_ranges(expression)
+    index = {'trip': (old_ranges[1][0], old_ranges[4][1])}
+
+    result = polyline.patch(expression, [(2, 3, [])], index=index)
+
+    assert result.index['trip'] is not None
+    assert polyline.decode(result.expression) == [
+        (38.5, -120.2), (40.7, -120.95), (44.0, -127.0),
+        (45.5, -128.25), (46.0, -129.0),
+    ]
+    start, stop = result.index['trip']
+    new_ranges = point_ranges(result.expression)
+    assert (start, stop) == (new_ranges[1][0], new_ranges[3][1])
+
+
+def test_patch_dropped_index_entry_becomes_none():
+    expression = polyline.encode(OFFICIAL_COORDS)
+    old_ranges = point_ranges(expression)
+
+    result = polyline.patch(expression, [(2, 3, [])], index={'gone': old_ranges[2]})
+
+    assert result.index == {'gone': None}

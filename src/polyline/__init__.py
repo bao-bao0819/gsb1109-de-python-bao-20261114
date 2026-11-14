@@ -1,6 +1,6 @@
 """
 Interface for the Polyline library.
 """
-from .polyline import decode, encode
+from .polyline import PatchResult, PointPatch, decode, encode, patch
 
-__all__ = ['decode', 'encode']
+__all__ = ['PatchResult', 'PointPatch', 'decode', 'encode', 'patch']

@@ -55,6 +55,35 @@ You can set the required precision with the optional ``precision`` parameter. Th
 
 You can decode into (lon, lat) tuples by setting ``geojson=True``.
 
+Batch point patches
+^^^^^^^^^^^^^^^^^^^
+
+When a track is re-surveyed, only a few points change. ``patch`` replaces
+several point ranges in one call, using the old point numbering, and returns
+both the new encoded string and the migrated index. Each range is
+``(start, stop, points)`` with ``start`` inclusive and ``stop`` exclusive, so
+an empty range inserts points::
+
+    import polyline
+    result = polyline.patch(
+        '_p~iF~ps|U_ulLnnqC_mqNvxq`@',
+        [(1, 2, [(40.5, -120.0)])],
+        index={'lunch': (10, 18), 'depot': (18, 27)})
+    result.expression     # the new polyline
+    result.index          # {'lunch': ..., 'depot': ...}
+
+A replacement may change the encoded length. Only the replaced points and the
+first untouched point after each range are re-encoded, because that point's
+delta changed; every later point is copied verbatim, so unaffected stops keep
+their exact bytes. Index entries whose points were deleted map to ``None``.
+Ranges are numbered against the old points, so all of them follow one shared
+coordinate system.
+
+All ranges are validated before anything is encoded. Two ranges that overlap in
+the old points raise ``ValueError``, and no partial string or index is
+produced. ``PointPatch`` is an equivalent named tuple, and ``geojson=True``
+accepts (lon, lat) coordinates just like ``encode``.
+
 
 Development
 -----------
