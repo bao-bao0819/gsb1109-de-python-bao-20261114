@@ -161,6 +161,62 @@ def test_encode_empty():
     assert polyline.decode(polyline.encode([])) == []
 
 
+def test_disambiguate_anchor_resolves_equator_ambiguity():
+    # Starts near the equator where swapped (lon, lat) also looks valid;
+    # the later anchor rules out every configuration but the sender's.
+    track = [(0.5, 0.9), (0.51, 0.91), (0.52, 0.92)]
+    expression = polyline.encode(track, 5)
+    matches = polyline.disambiguate(expression, anchors={2: (0.51, 0.91, 0.53, 0.93)})
+    assert matches == [(polyline.Candidate(precision=5, geojson=False), track)]
+
+
+def test_disambiguate_unresolvable_stays_pending():
+    # Symmetric track near the equator: both coordinate orders explain it,
+    # so both are returned instead of defaulting to one.
+    track = [(0.5, 0.5), (0.51, 0.51)]
+    expression = polyline.encode(track, 5)
+    matches = polyline.disambiguate(expression, anchors={0: (0.4, 0.4, 0.6, 0.6)})
+    configs = [candidate for candidate, _ in matches]
+    assert len(matches) == 2
+    assert polyline.Candidate(precision=5, geojson=False) in configs
+    assert polyline.Candidate(precision=5, geojson=True) in configs
+
+
+def test_disambiguate_max_step_rules_out_wrong_precision():
+    track = [(1.0, 2.0), (1.0005, 2.0003)]
+    expression = polyline.encode(track, 6)
+    matches = polyline.disambiguate(expression, max_step=150)
+    assert {candidate.precision for candidate, _ in matches} == {6}
+    matches = polyline.disambiguate(expression, max_step=150,
+                                    anchors={1: (1.0, 2.0, 1.001, 2.001)})
+    assert matches == [(polyline.Candidate(precision=6, geojson=False), track)]
+
+
+def test_disambiguate_geojson_sender_normalized_to_latlon():
+    track = [(40.641, -8.654), (40.642, -8.655)]
+    expression = polyline.encode(track, 5, geojson=True)
+    matches = polyline.disambiguate(expression, anchors={0: (40.6, -8.7, 40.7, -8.6)})
+    assert matches == [(polyline.Candidate(precision=5, geojson=True), track)]
+
+
+def test_disambiguate_custom_candidates():
+    track = [(40.641, -8.654), (40.642, -8.655)]
+    expression = polyline.encode(track, 6)
+    candidates = [polyline.Candidate(precision=5), polyline.Candidate(precision=6)]
+    matches = polyline.disambiguate(expression, candidates=candidates,
+                                    anchors={0: (40.6, -8.7, 40.7, -8.6)})
+    assert matches == [(polyline.Candidate(precision=6, geojson=False), track)]
+
+
+def test_disambiguate_no_candidate_fits():
+    expression = polyline.encode([(40.641, -8.654)], 5)
+    assert polyline.disambiguate(expression, anchors={0: (50, 0, 51, 1)}) == []
+
+
+def test_disambiguate_malformed_expression():
+    assert polyline.disambiguate('~~~') == []
+
+
 def test_encode_single_point_rounding():
     e = polyline.encode([
         (0, 0.000006),

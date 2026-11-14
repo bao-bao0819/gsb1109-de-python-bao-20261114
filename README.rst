@@ -55,6 +55,28 @@ You can set the required precision with the optional ``precision`` parameter. Th
 
 You can decode into (lon, lat) tuples by setting ``geojson=True``.
 
+Disambiguating
+^^^^^^^^^^^^^^
+
+When receiving polylines from senders with unknown configurations (e.g. precision 5 vs 6, or
+(lat, lon) vs (lon, lat) order), use ``disambiguate`` to find every configuration that plausibly
+explains the segment::
+
+    import polyline
+    polyline.disambiguate(
+        'gu`wFnfys@???nKgE',
+        anchors={0: (40.6, -8.7, 40.7, -8.6)},
+        max_step=500,
+    )
+
+Each candidate configuration is decoded and checked: coordinates must be valid, every anchor point
+must fall inside its ``(min_lat, min_lon, max_lat, max_lon)`` region, and adjacent points must not
+be more than ``max_step`` meters apart. The result is a list of ``(candidate, coordinates)`` pairs
+with coordinates always in (lat, lon) order. An empty list means no candidate fits; more than one
+match means the segment is ambiguous and should be kept pending instead of being committed to a
+default configuration. You can restrict the hypotheses with the optional ``candidates`` parameter,
+which defaults to all combinations of precision 5/6 and both coordinate orders.
+
 
 Development
 -----------

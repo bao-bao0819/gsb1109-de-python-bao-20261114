@@ -1,6 +1,6 @@
 """
 Interface for the Polyline library.
 """
-from .polyline import decode, encode
+from .polyline import Candidate, decode, disambiguate, encode
 
-__all__ = ['decode', 'encode']
+__all__ = ['Candidate', 'decode', 'disambiguate', 'encode']
