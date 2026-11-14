@@ -1,0 +1,210 @@
+{
+  "anomalies": {
+    "cycle": [],
+    "dangling": [],
+    "empty_ptr": [],
+    "invalid_type": [],
+    "repeat": [],
+    "stream_with_child": []
+  },
+  "disconnected_trees": [],
+  "duplicate_names": {},
+  "edges": [
+    {
+      "child": 1,
+      "owner": 0,
+      "role": "left"
+    },
+    {
+      "child": 2,
+      "owner": 0,
+      "role": "left"
+    },
+    {
+      "child": 3,
+      "owner": 0,
+      "role": "child"
+    },
+    {
+      "child": 4,
+      "owner": 0,
+      "role": "right"
+    },
+    {
+      "child": 5,
+      "owner": 0,
+      "role": "right"
+    }
+  ],
+  "entries": {
+    "0": {
+      "category": "ROOT_REACHABLE",
+      "child": "3",
+      "entry_type": "root",
+      "evidence_paths": [
+        [
+          0
+        ]
+      ],
+      "isect_start": 41,
+      "left": "-",
+      "name": "Root Entry",
+      "notes": [],
+      "parent_sids": [],
+      "right": "-",
+      "sid": 0,
+      "size": 128
+    },
+    "1": {
+      "category": "ROOT_REACHABLE",
+      "child": "-",
+      "entry_type": "stream",
+      "evidence_paths": [
+        [
+          0,
+          1
+        ]
+      ],
+      "isect_start": 8,
+      "left": "-",
+      "name": "1Table",
+      "notes": [],
+      "parent_sids": [
+        0
+      ],
+      "right": "5",
+      "sid": 1,
+      "size": 6438
+    },
+    "2": {
+      "category": "ROOT_REACHABLE",
+      "child": "-",
+      "entry_type": "stream",
+      "evidence_paths": [
+        [
+          0,
+          2
+        ]
+      ],
+      "isect_start": 0,
+      "left": "1",
+      "name": "WordDocument",
+      "notes": [],
+      "parent_sids": [
+        0
+      ],
+      "right": "-",
+      "sid": 2,
+      "size": 4096
+    },
+    "3": {
+      "category": "ROOT_REACHABLE",
+      "child": "-",
+      "entry_type": "stream",
+      "evidence_paths": [
+        [
+          0,
+          3
+        ]
+      ],
+      "isect_start": 21,
+      "left": "2",
+      "name": "\u0005SummaryInformation",
+      "notes": [],
+      "parent_sids": [
+        0
+      ],
+      "right": "4",
+      "sid": 3,
+      "size": 4096
+    },
+    "4": {
+      "category": "ROOT_REACHABLE",
+      "child": "-",
+      "entry_type": "stream",
+      "evidence_paths": [
+        [
+          0,
+          4
+        ]
+      ],
+      "isect_start": 29,
+      "left": "-",
+      "name": "\u0005DocumentSummaryInformation",
+      "notes": [],
+      "parent_sids": [
+        0
+      ],
+      "right": "-",
+      "sid": 4,
+      "size": 4096
+    },
+    "5": {
+      "category": "ROOT_REACHABLE",
+      "child": "-",
+      "entry_type": "stream",
+      "evidence_paths": [
+        [
+          0,
+          5
+        ]
+      ],
+      "isect_start": 0,
+      "left": "-",
+      "name": "\u0001CompObj",
+      "notes": [],
+      "parent_sids": [
+        0
+      ],
+      "right": "-",
+      "sid": 5,
+      "size": 114
+    },
+    "6": {
+      "category": "SLOT_EMPTY",
+      "child": "-",
+      "entry_type": "empty",
+      "evidence_paths": [],
+      "isect_start": 0,
+      "left": "-",
+      "name": "",
+      "notes": [],
+      "parent_sids": [],
+      "right": "-",
+      "sid": 6,
+      "size": 0
+    },
+    "7": {
+      "category": "SLOT_EMPTY",
+      "child": "-",
+      "entry_type": "empty",
+      "evidence_paths": [],
+      "isect_start": 0,
+      "left": "-",
+      "name": "",
+      "notes": [],
+      "parent_sids": [],
+      "right": "-",
+      "sid": 7,
+      "size": 0
+    }
+  },
+  "olefile_parsing_issues": [],
+  "root_reachable": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5
+  ],
+  "source_file": "tests/images/test-ole-file.doc",
+  "summary": {
+    "DISCONNECTED_ONLY": 0,
+    "MULTIPLE_ATTRIBUTION": 0,
+    "ROOT_REACHABLE": 6,
+    "SLOT_EMPTY": 2,
+    "SLOT_INVALID": 0
+  },
+  "total_slots": 8
+}
