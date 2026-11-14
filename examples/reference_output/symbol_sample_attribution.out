@@ -1,0 +1,30 @@
+Section .init [0x4003c0, 0x4003d8)
+  definite:
+    _init 0x4003c0-0x4003d8 [inferred]: 5
+  disputed:
+    (none)
+  unowned: 0
+  check: definite 5 + disputed 0 + unowned 0 = 5 (input 5) OK
+Section .text [0x400400, 0x4005f8)
+  definite:
+    _start 0x400400-0x40042c [inferred]: 5
+    call_gmon_start 0x40042c-0x400450 [inferred]: 5
+    __do_global_dtors_aux 0x400450-0x4004c0 [inferred]: 5
+    frame_dummy 0x4004c0-0x4004ec [inferred]: 5
+    main 0x4004ec-0x400517: 5
+    __libc_csu_fini 0x400520-0x400522: 5
+    __libc_csu_init 0x400530-0x4005b9: 5
+    __do_global_ctors_aux 0x4005c0-0x4005f8 [inferred]: 5
+  disputed:
+    (none)
+  unowned: 1
+  check: definite 40 + disputed 0 + unowned 1 = 41 (input 41) OK
+Section .fini [0x4005f8, 0x400606)
+  definite:
+    _fini 0x4005f8-0x400606 [inferred]: 5
+  disputed:
+    (none)
+  unowned: 0
+  check: definite 5 + disputed 0 + unowned 0 = 5 (input 5) OK
+Unowned outside any section: 4
+Total: definite 50 + disputed 0 + unowned 5 = 55 (input 55) OK
