@@ -55,6 +55,61 @@ You can set the required precision with the optional ``precision`` parameter. Th
 
 You can decode into (lon, lat) tuples by setting ``geojson=True``.
 
+To keep track of where each point came from, use ``decode_with_provenance``. It returns the same values as ``decode``, plus the half-open character range of every point in the encoded string::
+
+    polyline.decode_with_provenance('_p~iF~ps|U_ulLnnqC_mqNvxq`@')
+    # [DecodedPoint(lat=38.5, lon=-120.2, start=0, end=10),
+    #  DecodedPoint(lat=40.7, lon=-120.95, start=10, end=18),
+    #  DecodedPoint(lat=43.252, lon=-126.453, start=18, end=27)]
+
+Incremental decoding
+^^^^^^^^^^^^^^^^^^^^
+
+Trajectories often arrive in packets that can end after any character of the
+encoded string, including between the latitude and longitude of one point, or
+in the middle of a multi-character coordinate value. ``IncrementalDecoder``
+consumes packets and emits only complete ``(lat, lon)`` points; the unfinished
+part stays in its state::
+
+    decoder = polyline.IncrementalDecoder(precision=5)
+    decoder.feed('_p~iF~ps|U', 0)              # returns the first point
+    decoder.feed('_ulLnnqC_mqNvxq`@', 10)      # returns the remaining points
+    decoder.finish()                           # asserts the input ended on a boundary
+
+Each returned point is a ``DecodedPoint`` with the original character range
+``[start, end)``. ``decoder.cursor`` is the number of source characters consumed
+so far, so it always matches ``points[-1].end`` once anything has been emitted.
+
+The decoder state can be persisted and restored, either as a dictionary or as JSON::
+
+    state = decoder.save_state(as_json=True)
+    resumed = polyline.IncrementalDecoder.from_state(state)
+    resumed.feed(next_packet, 10)
+
+``state`` holds the consumed source text, the accumulated coordinates, any
+partially decoded coordinate, the emitted points, and their provenance, so
+restoring does not need any prior packet.
+
+When a sender repeats the previous packet, pass its absolute offset to
+``feed``. The overlap is compared character by character against the consumed
+source text; matching characters are skipped and only the new suffix is
+decoded. A repeated packet that starts before the cursor but matches is therefore
+harmless::
+
+    decoder.feed(previous_packet, 0)            # duplicate_characters == len(previous_packet)
+    decoder.feed(previous_packet, 0)            # returns []
+
+If the same offset holds a different character, ``PolylineConflictError`` reports
+the absolute offset, the expected and received characters, and the packet offset.
+A packet that starts past the current cursor raises ``PolylineGapError``; ``finish``
+raises ``PolylineIncompleteError`` if the stream ends inside a point.
+
+``decode_incremental(packets)`` is a convenience wrapper that accepts a list of
+strings, or of ``(offset, string)`` pairs, and returns all decoded points at once::
+
+    polyline.decode_incremental([(0, '_p~iF~ps|U_ulLnnq'), (18, 'C_mqNvxq`@')])
+
+
 
 Development
 -----------
