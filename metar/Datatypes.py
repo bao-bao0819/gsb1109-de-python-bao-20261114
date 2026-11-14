@@ -2,6 +2,7 @@
 # Distributed under the terms of the BSD 2-Clause License.
 # SPDX-License-Identifier: BSD-2-Clause
 """Python classes to represent dimensioned quantities used in weather reports."""
+import enum
 import re
 from math import pi, sin, cos, atan2
 
@@ -317,6 +318,144 @@ class distance(object):
         elif self._gtlt == "<":
             text = "less than " + text
         return text
+
+
+class RVRThresholdVerdict(enum.Enum):
+    """How an observed runway visual range compares with a given threshold."""
+
+    DEFINITELY_BELOW = "definitely below"
+    POSSIBLY_BELOW = "possibly below"
+    DEFINITELY_NOT_BELOW = "definitely not below"
+
+    def __str__(self):
+        return self.value
+
+
+class RunwayVisualRange(object):
+    """A runway visual range observation for one runway direction.
+
+    The observation is represented by the interval of values it allows,
+    stored in metres as ``low``/``high`` together with ``low_inclusive`` and
+    ``high_inclusive`` flags that record whether each endpoint is open or
+    closed.  The reported code is retained verbatim in ``code`` together with
+    the runway ``name`` and the original reporting ``unit``.
+
+    A truncated value extends to a physical limit rather than fixing both
+    ends: a leading ``M`` (less than) means the true range is strictly below
+    the reported number, so the interval runs from the zero floor up to an
+    open upper bound, while a leading ``P`` (greater than) means it is
+    strictly above the reported number, running from an open lower bound to
+    positive infinity.  An ordinary reported number is a closed endpoint.
+    """
+
+    legal_units = distance.legal_units
+    FLOOR = 0.0
+    CEILING = float("inf")
+
+    def __init__(self, name, low, high, unit, code=None, tendency=None, varying=False):
+        self.name = name
+        self.code = code
+        self.unit = unit.upper() if unit else "M"
+        self.tendency = tendency
+
+        low_value, low_prefix = self._parse_bound(low)
+        high_value, high_prefix = self._parse_bound(high)
+
+        if varying:
+            # An explicit low-to-high range: keep both numbers and only open
+            # an endpoint whose reported bound carries a truncation prefix.
+            self.low = low_value
+            self.high = high_value
+            self.low_inclusive = low_prefix is None
+            self.high_inclusive = high_prefix is None
+        elif low_prefix == "P":
+            # "greater than": the true range lies strictly above low_value
+            self.low = low_value
+            self.low_inclusive = False
+            self.high = self.CEILING
+            self.high_inclusive = False
+        elif high_prefix == "M":
+            # "less than": the true range lies strictly below high_value
+            self.low = self.FLOOR
+            self.low_inclusive = True
+            self.high = high_value
+            self.high_inclusive = False
+        else:
+            self.low = low_value
+            self.high = high_value
+            self.low_inclusive = low_prefix is None
+            self.high_inclusive = high_prefix is None
+
+    def _parse_bound(self, token):
+        """Return (metres, truncation prefix) for one reported bound."""
+        if isinstance(token, str):
+            prefix = token[0] if token[0] in ("M", "P") else None
+        else:
+            prefix = None
+        return distance(token, self.unit).value("M"), prefix
+
+    def value_below(self, threshold, units="M"):
+        """Classify the observation against a threshold in the given units.
+
+        Return :class:`RVRThresholdVerdict` indicating whether the observed
+        range is definitely below, possibly below or definitely not below the
+        threshold.  The whole interval must lie below the threshold for a
+        "definitely below" verdict, and must lie at or above it for a
+        "definitely not below" verdict; an interval that straddles the
+        threshold is only "possibly below".  An open bound that meets the
+        threshold exactly does not contain that value, so it is still below
+        (or above) the threshold.
+        """
+        threshold_m = (
+            threshold.value("M")
+            if isinstance(threshold, distance)
+            else distance(threshold, units).value("M")
+        )
+        if self.high_inclusive:
+            all_below = self.high < threshold_m
+        else:
+            all_below = self.high <= threshold_m
+        none_below = self.low >= threshold_m
+        if all_below:
+            return RVRThresholdVerdict.DEFINITELY_BELOW
+        if none_below:
+            return RVRThresholdVerdict.DEFINITELY_NOT_BELOW
+        return RVRThresholdVerdict.POSSIBLY_BELOW
+
+    def bounds(self, units="M"):
+        """Return the ``(low, high)`` bounds converted to the given units."""
+        scale = distance(1, "M").value(units)
+        return (self.low * scale, self.high * scale)
+
+    def __repr__(self):
+        lo = "[" if self.low_inclusive else "("
+        hi = "]" if self.high_inclusive else ")"
+        return "RunwayVisualRange(%r, %s%.3f, %.3f%s m)" % (
+            self.name,
+            lo,
+            self.low,
+            self.high,
+            hi,
+        )
+
+    def __str__(self):
+        return self.string()
+
+    def string(self, units=None):
+        """Return a textual description of the range in the given units."""
+        units = units if units is not None else self.unit
+        if self.high == self.CEILING:
+            text = "greater than " + distance(self.low, "M").string(units)
+        elif self.low == self.FLOOR and not self.high_inclusive:
+            text = "less than " + distance(self.high, "M").string(units)
+        elif self.high == self.low:
+            text = distance(self.low, "M").string(units)
+        else:
+            text = "from %s to %s" % (
+                distance(self.low, "M").string(units),
+                distance(self.high, "M").string(units),
+            )
+        return "on runway %s, %s" % (self.name, text)
 
 
 class direction(object):

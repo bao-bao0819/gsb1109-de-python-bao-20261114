@@ -1,4 +1,5 @@
-from typing import Literal, Optional, Union
+import enum
+from typing import Literal, Optional, Tuple, Union
 
 GreaterOrLess = Literal[">", "<"]
 Value = Union[str, float]
@@ -61,6 +62,44 @@ class distance:
     ) -> None: ...
     def __str__(self) -> str: ...
     def value(self, units: Optional[DistanceUnit] = None) -> float: ...
+    def string(self, units: Optional[DistanceUnit] = None) -> str: ...
+
+class RVRThresholdVerdict(enum.Enum):
+    DEFINITELY_BELOW: RVRThresholdVerdict
+    POSSIBLY_BELOW: RVRThresholdVerdict
+    DEFINITELY_NOT_BELOW: RVRThresholdVerdict
+    def __str__(self) -> str: ...
+
+class RunwayVisualRange:
+    name: str
+    code: Optional[str]
+    unit: DistanceUnit
+    tendency: Optional[Literal["U", "D", "N"]]
+    low: float
+    high: float
+    low_inclusive: bool
+    high_inclusive: bool
+    FLOOR: float
+    CEILING: float
+
+    def __init__(
+        self,
+        name: str,
+        low: Value,
+        high: Value,
+        unit: Optional[DistanceUnit] = ...,
+        code: Optional[str] = ...,
+        tendency: Optional[Literal["U", "D", "N"]] = ...,
+        varying: bool = ...,
+    ) -> None: ...
+    def value_below(
+        self,
+        threshold: Union[Value, distance],
+        units: Optional[DistanceUnit] = ...,
+    ) -> RVRThresholdVerdict: ...
+    def bounds(self, units: Optional[DistanceUnit] = None) -> Tuple[float, float]: ...
+    def __repr__(self) -> str: ...
+    def __str__(self) -> str: ...
     def string(self, units: Optional[DistanceUnit] = None) -> str: ...
 
 CompassDirection = Literal[

@@ -1,6 +1,20 @@
 Change Log
 ==========
 
+Unreleased
+
+- Add `metar.Datatypes.RunwayVisualRange` and `RVRThresholdVerdict` to hold a
+  runway direction's visual range as an open/closed interval and classify it
+  against a threshold as definitely below, possibly below or definitely not
+  below. `M` and `P` truncations extend to the zero floor or infinity, metres
+  and feet are converted before comparison, and exact open/closed boundaries
+  decide borderline thresholds.
+- Expose the parsed records through `Metar.runway_visual_ranges`, the missing
+  runway directions (e.g. `R28L////`) through `Metar.runway_missing`, and add
+  `runway_visual_range_record()`, `rvr_threshold_verdict()` and
+  `rvr_threshold_verdicts()`. Missing directions are reported separately and
+  are not counted as "definitely not below".
+
 metar-2.0.2 (26 October 2026)
 
 - Infer a month when METAR day is ambiguous and day of the month does not

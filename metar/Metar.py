@@ -19,6 +19,8 @@ from metar.Datatypes import (
     distance,
     direction,
     precipitation,
+    RunwayVisualRange,
+    RVRThresholdVerdict,
 )
 
 # logger
@@ -63,7 +65,7 @@ VISIBILITY_RE = re.compile(
     re.VERBOSE,
 )
 RUNWAY_RE = re.compile(
-    r"""^(RVRNO |
+    r"""^(?P<rvr>RVRNO |
         R(?P<name>\d\d(RR?|LL?|C)?)/
         (?P<low>(M|P)?(\d\d\d\d|/{4}))
         (V(?P<high>(M|P)?\d\d\d\d))?
@@ -391,6 +393,8 @@ class Metar(object):
         self.press = None  # barometric pressure [pressure]
         self.runway = []  # runway visibility (list of tuples)
         self.runway_tendencies = []  # U, D, N or None, in the same order as runway
+        self.runway_visual_ranges = []  # RunwayVisualRange objects, same order as runway
+        self.runway_missing = []  # runway directions reported as missing (R...////)
         self.weather = []  # present weather (list of tuples)
         self.recent = []  # recent weather (list of tuples)
         self.sky = []  # sky conditions (list of tuples)
@@ -694,27 +698,40 @@ class Metar(object):
         Parse a runway visual range group.
 
         The following attributes are set:
-            range   [list of tuples]
-            . name  [string]
-            . low   [distance]
-            . high  [distance]
-            . unit  [string]
-            runway_tendencies [list of U, D, N or None, aligned with runway]
+            runway                [list of [name, low, high, unit] records]
+            runway_tendencies     [list of U, D, N or None, aligned with runway]
+            runway_visual_ranges  [list of RunwayVisualRange, aligned with runway]
+            runway_missing        [list of runway directions with no usable range]
         """
         if d["name"] is None:
             return
+        name = d["name"]
         unit = d["unit"] if d["unit"] is not None else "M"
+        tendency = d["tendency"].strip("/")
+        tendency = tendency if tendency in ("U", "D", "N") else None
         if d["low"] == "////":
+            self.runway_missing.append(name)
             return
-        else:
-            low = distance(d["low"], unit)
+        low = distance(d["low"], unit)
         if d["high"] is None:
             high = low
+            high_token = d["low"]
         else:
             high = distance(d["high"], unit)
-        self.runway.append([d["name"], low, high, unit])
-        tendency = d["tendency"].strip("/")
-        self.runway_tendencies.append(tendency if tendency in ("U", "D", "N") else None)
+            high_token = d["high"]
+        self.runway.append([name, low, high, unit])
+        self.runway_tendencies.append(tendency)
+        self.runway_visual_ranges.append(
+            RunwayVisualRange(
+                name,
+                d["low"],
+                high_token,
+                unit,
+                code=d["rvr"].strip(),
+                tendency=tendency,
+                varying=d["high"] is not None,
+            )
+        )
 
     def _handleWeather(self, d):
         """
@@ -1292,6 +1309,49 @@ class Metar(object):
                 if tendency is not None:
                     lines[-1] += ", " + tendency_text[tendency]
         return "; ".join(lines)
+
+    def runway_visual_range_record(self, name):
+        """
+        Return the RunwayVisualRange recorded for a runway direction.
+
+        Return None when the direction has no usable runway visual range in
+        this report (it is then listed in ``runway_missing`` instead).
+        """
+        for rvr in self.runway_visual_ranges:
+            if rvr.name == name:
+                return rvr
+        return None
+
+    def rvr_threshold_verdict(self, name, threshold, units="M"):
+        """
+        Classify one runway direction's range against a threshold.
+
+        Return an RVRThresholdVerdict, or None if that direction is missing.
+        """
+        rvr = self.runway_visual_range_record(name)
+        if rvr is None:
+            return None
+        return rvr.value_below(threshold, units)
+
+    def rvr_threshold_verdicts(self, threshold, units="M"):
+        """
+        Classify every usable runway visual range against a threshold.
+
+        The threshold may be a number in the given units or a distance
+        object.  Runway directions without any usable range are returned
+        separately under ``"missing"`` and are not counted among the
+        evaluated observations, so they never inflate the
+        "definitely not below" group.
+        """
+        result = {
+            RVRThresholdVerdict.DEFINITELY_BELOW: [],
+            RVRThresholdVerdict.POSSIBLY_BELOW: [],
+            RVRThresholdVerdict.DEFINITELY_NOT_BELOW: [],
+            "missing": list(self.runway_missing),
+        }
+        for rvr in self.runway_visual_ranges:
+            result[rvr.value_below(threshold, units)].append(rvr)
+        return result
 
     def present_weather(self):
         """

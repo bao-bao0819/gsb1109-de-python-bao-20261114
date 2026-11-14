@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
 from re import Match
-from typing import Callable, List, Literal, Optional, Tuple, Union
+from typing import Callable, Dict, List, Literal, Optional, Tuple, Union
 
 from metar.Datatypes import (
     direction,
@@ -9,6 +9,8 @@ from metar.Datatypes import (
     pressure,
     speed,
     temperature,
+    RVRThresholdVerdict,
+    RunwayVisualRange,
 )
 
 def xlate_loc(loc: str) -> str: ...
@@ -40,6 +42,8 @@ class Metar:
     press: Optional[pressure]
     runway: List[list]
     runway_tendencies: List[Optional[Literal["U", "D", "N"]]]
+    runway_visual_ranges: List[RunwayVisualRange]
+    runway_missing: List[str]
     weather: List[Tuple[str, str, str, str, str]]
     recent: List[Tuple[str, str, str, str, str]]
     sky: List[Tuple[str, Optional[distance], str]]
@@ -144,6 +148,28 @@ class Metar:
             ]
         ] = ...,
     ) -> str: ...
+    def runway_visual_range_record(self, name: str) -> Optional[RunwayVisualRange]: ...
+    def rvr_threshold_verdict(
+        self,
+        name: str,
+        threshold: Union[float, int, distance],
+        units: Optional[
+            Literal[
+                "SM", "MI", "M", "KM", "FT", "IN", "sm", "mi", "m", "km", "ft", "in"
+            ]
+        ] = ...,
+    ) -> Optional[RVRThresholdVerdict]: ...
+    def rvr_threshold_verdicts(
+        self,
+        threshold: Union[float, int, distance],
+        units: Optional[
+            Literal[
+                "SM", "MI", "M", "KM", "FT", "IN", "sm", "mi", "m", "km", "ft", "in"
+            ]
+        ] = ...,
+    ) -> Dict[
+        Union[RVRThresholdVerdict, str], List[Union[RunwayVisualRange, str]]
+    ]: ...
     def present_weather(self) -> str: ...
     def recent_weather(self) -> str: ...
     def _weather(self, weather: list) -> str: ...
