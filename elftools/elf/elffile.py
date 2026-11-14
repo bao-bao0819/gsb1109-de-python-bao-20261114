@@ -396,6 +396,48 @@ class ELFFile:
             dwarfinfo.supplementary_dwarfinfo = self.get_supplementary_dwarfinfo(dwarfinfo)
         return dwarfinfo
 
+    def get_build_ids(self) -> list[str]:
+        """ Return the GNU build IDs stored in this file, as hex strings.
+
+        Build IDs may live in a SHT_NOTE section or in a PT_NOTE segment, and
+        stripped files without section headers still carry them in a segment.
+        Only notes owned by 'GNU' with NT_GNU_BUILD_ID are considered; other
+        note namespaces may reuse the same type number for unrelated data.
+        Duplicate copies of the same ID are returned once, in file order.
+        Malformed notes are skipped rather than making the whole file
+        unreadable, since callers use this only as an additional identifier.
+        """
+        build_ids: list[str] = []
+        seen: set[str] = set()
+
+        def collect(notes: Iterator[Any]) -> None:
+            try:
+                for note in notes:
+                    if (note['n_name'] == 'GNU' and
+                            note['n_type'] == 'NT_GNU_BUILD_ID'):
+                        desc = note['n_desc']
+                        # iter_notes() formats NT_GNU_BUILD_ID as a hex string;
+                        # tolerate raw bytes from custom note decoders.
+                        build_id = (desc.hex() if isinstance(desc, bytes)
+                                    else str(desc).lower())
+                        if build_id not in seen:
+                            seen.add(build_id)
+                            build_ids.append(build_id)
+            except (ELFError, ELFParseError, UnicodeDecodeError):
+                # A damaged note must not hide other identifiers.
+                return
+
+        for section in self.iter_sections(type='SHT_NOTE'):
+            collect(section.iter_notes())
+        for segment in self.iter_segments(type='PT_NOTE'):
+            collect(segment.iter_notes())
+        return build_ids
+
+    def get_build_id(self) -> str | None:
+        """ Return the first GNU build ID in the file, or None."""
+        build_ids = self.get_build_ids()
+        return build_ids[0] if build_ids else None
+
     def has_dwarf_link(self) -> bool:
         """ Whether the binary's debug info is in an
             external file. Use get_dwarf_link to retrieve the path to it.

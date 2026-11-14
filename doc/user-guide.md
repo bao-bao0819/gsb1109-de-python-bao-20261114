@@ -179,6 +179,48 @@ the answer is positive, use the `get_dwarf_info` method to get a
 all the required book-keeping (including even relocation of DWARF
 sections), and the resulting `DWARFInfo` is ready for usage.
 
+### External debug files
+
+`ELFFile.get_build_ids()` returns the GNU build IDs (`NT_GNU_BUILD_ID`
+notes owned by `GNU`) as hex strings, reading both note sections and note
+segments, so stripped files without section headers still expose an
+identity. `ELFFile.get_dwarf_link()` returns the `.gnu_debuglink` file
+name and CRC32.
+
+`elftools.elf.debuglink` matches local ELF files against debug files from
+an offline archive. It is intended for archives where many builds share
+the same file name:
+
+```python
+from elftools.elf.debuglink import CandidateManifest, match_manifest
+
+manifest = CandidateManifest.from_file('archive-manifest.json')
+for result in match_manifest(manifest):
+    print(result.elf, result.status, result.selected.path if result.selected else None)
+```
+
+A JSON manifest accepts `directories` (searched recursively),
+`files`, `elfs`, and `recursive`. A plain text manifest contains one
+path per line. For each ELF, every candidate is recorded with its path,
+size, CRC32, SHA-256, build ID, and the evidence used to accept or
+reject it (`result.to_dict()`).
+
+The rules are deliberately conservative:
+
+- A candidate whose file name matches `.gnu_debuglink` but whose CRC32
+  does not is never selected.
+- A candidate without the debuglink name must match the GNU build ID
+  and contain DWARF debug sections.
+- If several byte-different candidates match, a group is dismissed only
+  when every copy in it is positively identified as a different build by
+  its GNU build ID. If any different-content candidate has no build ID
+  to exclude it, the result stays `ambiguous` instead of guessing.
+- Ambiguity is reported per ELF; the other ELF files in the same
+  manifest are still matched independently.
+
+`scripts/find_debug_info.py` writes the same audit information as a JSON
+report and returns a non-zero exit status when any ELF is not matched.
+
 To follow a type reference, use `die.get_DIE_from_attribute('DW_AT_type')`.
 Reference forms such as `DW_FORM_ref4` store offsets relative to the compilation
 unit, so their attribute values cannot be compared directly with `DIE.offset`.
