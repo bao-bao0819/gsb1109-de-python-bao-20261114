@@ -106,7 +106,7 @@ Here's a sample program
     position.market_value
 
   # Security
-  
+
   security = transaction.security
   # or
   security = position.security
@@ -114,7 +114,39 @@ Here's a sample program
   security.name
   security.ticker
   security.memo
-  
+
+Correction chains
+=================
+
+A bank may replace or delete a transaction that appeared in an earlier
+statement, and a correction file may arrive before the statement containing
+the original transaction.  ``ofxparse`` keeps every observed version and only
+exposes the transaction that is still valid::
+
+  from ofxparse import CorrectionLedger
+
+  ledger = CorrectionLedger()
+  ledger.add_file('original.ofx')
+  ledger.add_file('replacement.ofx')
+  ledger.add_file('void.ofx')
+
+  ledger.valid_transactions    # currently effective transactions
+  ledger.balance_contribution  # their sum
+  ledger.correction_chains     # full A -> B -> C histories
+  ledger.pending_chains        # contradictory histories needing review
+
+FITIDs are interpreted per institution and account, so equal IDs from
+different banks or accounts never share a correction chain.  Adding files in
+any order, or adding the same statement twice, yields the same result.
+
+Corrections use the OFX ``CORRECTFITID`` and ``CORRECTACTION`` aggregates and
+are available on each parsed transaction as ``correct_fitid`` and
+``correct_action``.  ``DELETE`` voids the referenced transaction; ``REPLACE``
+supersedes it.  If one FITID is referenced by mutually exclusive corrections
+(for example both ``REPLACE`` and ``DELETE``, or two different replacements),
+that whole chain is moved to ``pending_chains`` and contributes nothing to
+``valid_transactions`` or the balance until it is reconciled.
+
 
 Help!
 =====

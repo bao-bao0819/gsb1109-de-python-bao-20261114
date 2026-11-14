@@ -220,6 +220,34 @@ class Account(object):
         # For backwards compatibility.  Remove in version 1.0.
         return self.account_id
 
+    def _ledger(self):
+        from .corrections import AccountKey, AccountLedger
+        key = AccountKey.from_account(self)
+        ledger = AccountLedger(key)
+        if self.statement is not None:
+            ledger.add_transactions(self.statement.transactions)
+        return ledger
+
+    @property
+    def valid_transactions(self):
+        return self._ledger().valid_transactions
+
+    @property
+    def current_transactions(self):
+        return self.valid_transactions
+
+    @property
+    def pending_transactions(self):
+        return self._ledger().pending_transactions
+
+    @property
+    def correction_chains(self):
+        return self._ledger().chains
+
+    @property
+    def balance_contribution(self):
+        return self._ledger().balance_contribution
+
 
 class InvestmentAccount(Account):
     def __init__(self):
@@ -297,6 +325,31 @@ class Statement(object):
         self.discarded_entries = []
         self.warnings = []
 
+    def _ledger(self, account=None):
+        from .corrections import AccountKey, AccountLedger
+        ledger = AccountLedger(AccountKey.from_account(account))
+        ledger.add_transactions(self.transactions)
+        return ledger
+
+    @property
+    def valid_transactions(self):
+        return self._ledger().valid_transactions
+
+    @property
+    def current_transactions(self):
+        return self.valid_transactions
+
+    @property
+    def pending_transactions(self):
+        return self._ledger().pending_transactions
+
+    @property
+    def correction_chains(self):
+        return self._ledger().chains
+
+    def balance_contribution(self, account=None):
+        return self._ledger(account).balance_contribution
+
 
 class InvestmentStatement(object):
     def __init__(self):
@@ -319,6 +372,33 @@ class Transaction(object):
         self.sic = None
         self.mcc = ''
         self.checknum = ''
+        self.correct_fitid = ''
+        self.correct_action = ''
+
+    @property
+    def corrected_fitid(self):
+        return self.correct_fitid
+
+    @corrected_fitid.setter
+    def corrected_fitid(self, value):
+        self.correct_fitid = value
+
+    correction_fitid = corrected_fitid
+    correct_fit_id = corrected_fitid
+    corrected_id = corrected_fitid
+    correction_id = corrected_fitid
+    corrected_transaction_id = corrected_fitid
+
+    @property
+    def correctaction(self):
+        return self.correct_action
+
+    @correctaction.setter
+    def correctaction(self, value):
+        self.correct_action = value
+
+    correction_action = correctaction
+    corrected_action = correctaction
 
     def __repr__(self):
         return "<Transaction units=" + str(self.amount) + ">"
@@ -345,6 +425,38 @@ class InvestmentTransaction(object):
         self.fees = decimal.Decimal(0)
         self.total = decimal.Decimal(0)
         self.tferaction = None
+        self.id = ''
+        self.correct_fitid = ''
+        self.correct_action = ''
+
+    @property
+    def amount(self):
+        return self.total
+
+    @property
+    def corrected_fitid(self):
+        return self.correct_fitid
+
+    @corrected_fitid.setter
+    def corrected_fitid(self, value):
+        self.correct_fitid = value
+
+    correction_fitid = corrected_fitid
+    correct_fit_id = corrected_fitid
+    corrected_id = corrected_fitid
+    correction_id = corrected_fitid
+    corrected_transaction_id = corrected_fitid
+
+    @property
+    def correctaction(self):
+        return self.correct_action
+
+    @correctaction.setter
+    def correctaction(self, value):
+        self.correct_action = value
+
+    correction_action = correctaction
+    corrected_action = correctaction
 
     def __repr__(self):
         return "<InvestmentTransaction type=" + str(self.type) + ", \
@@ -666,6 +778,18 @@ class OfxParser(object):
         tag = ofx.find('tferaction')
         if hasattr(tag, 'contents'):
             transaction.tferaction = tag.contents[0].strip()
+        tag = ofx.find('correctfitid')
+        if hasattr(tag, 'contents'):
+            try:
+                transaction.correct_fitid = tag.contents[0].strip()
+            except IndexError:
+                pass
+        tag = ofx.find('correctaction')
+        if hasattr(tag, 'contents'):
+            try:
+                transaction.correct_action = tag.contents[0].strip().upper()
+            except IndexError:
+                pass
         return transaction
 
     @classmethod
@@ -1059,6 +1183,26 @@ class OfxParser(object):
         else:
             raise OfxParserException(six.u("Missing FIT id (a required \
                                      field)"))
+
+        correct_fitid_tag = txn_ofx.find('correctfitid')
+        if hasattr(correct_fitid_tag, 'contents'):
+            try:
+                transaction.correct_fitid = \
+                    correct_fitid_tag.contents[0].strip()
+            except IndexError:
+                pass
+            except TypeError:
+                pass
+
+        correct_action_tag = txn_ofx.find('correctaction')
+        if hasattr(correct_action_tag, 'contents'):
+            try:
+                transaction.correct_action = \
+                    correct_action_tag.contents[0].strip().upper()
+            except IndexError:
+                pass
+            except TypeError:
+                pass
 
         sic_tag = txn_ofx.find('sic')
         if hasattr(sic_tag, 'contents'):

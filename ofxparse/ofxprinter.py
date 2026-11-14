@@ -60,6 +60,16 @@ class OfxPrinter():
 
         self.writeLine("<FITID>{}".format(trn.id), tabs=tabs)
 
+        if len(str(getattr(trn, 'correct_fitid', ''))) > 0:
+            self.writeLine("<CORRECTFITID>{}".format(
+                trn.correct_fitid
+            ), tabs=tabs)
+
+        if len(str(getattr(trn, 'correct_action', ''))) > 0:
+            self.writeLine("<CORRECTACTION>{}".format(
+                trn.correct_action
+            ), tabs=tabs)
+
         if len(str(trn.checknum)) > 0:
             self.writeLine("<CHECKNUM>{}".format(
                 trn.checknum
