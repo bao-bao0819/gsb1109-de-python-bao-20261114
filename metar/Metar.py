@@ -346,6 +346,732 @@ def _unparsedGroup(self, d):
     self._unparsed_groups.append(d["group"])
 
 
+# ---------------------------------------------------------------------------
+# Trend (BECMG / TEMPO) timeline support
+#
+# A trend group is a forecast, so it describes conditions that are not the
+# observation itself.  The classes below keep the observation, the permanent
+# (BECMG) changes and the temporary (TEMPO) overlays apart while still making
+# it possible to ask what the weather is at a particular instant.
+# ---------------------------------------------------------------------------
+
+TREND_INDICATORS = ("BECMG", "TEMPO", "FCST", "NOSIG")
+
+# A trend time group is one of FMhhmm, TLhhmm or AThhmm.  Some reports also
+# use the older shorthand "hhmm" for a window, e.g. BECMG 0306.  Both forms
+# are handled by _parse_trend_time().
+TREND_TIME_TOKEN_RE = re.compile(r"^(?P<when>FM|TL|AT)(?P<hour>\d\d)(?P<min>\d\d)$")
+BARE_TREND_TIME_RE = re.compile(r"^(?P<hour>\d\d)(?P<min>\d\d)$")
+
+
+class Conditions(object):
+    """A snapshot of the decoded weather elements at one instant.
+
+    The attribute names deliberately mirror the attributes of :class:`Metar`
+    so that a condition can be used in the same way as the observation from
+    which it was derived.  ``Conditions`` objects also support a small number
+    of convenient aliases through ``[]`` (``"visibility"``, ``"wind"``,
+    ``"temperature"``, ...).
+    """
+
+    FIELDS = (
+        "wind_dir",
+        "wind_speed",
+        "wind_gust",
+        "wind_dir_from",
+        "wind_dir_to",
+        "vis",
+        "vis_dir",
+        "max_vis",
+        "max_vis_dir",
+        "weather",
+        "sky",
+        "cavok",
+        "temp",
+        "dewpt",
+        "press",
+        "recent",
+        "runway",
+        "runway_tendencies",
+        "windshear",
+        "snowdepth",
+    )
+
+    def __init__(self, **kwargs):
+        for field in self.FIELDS:
+            value = kwargs.get(field)
+            if field in ("weather", "recent", "sky", "runway", "windshear"):
+                value = list(value) if value is not None else []
+            elif field == "runway_tendencies":
+                value = list(value) if value is not None else []
+            setattr(self, field, value)
+
+    @classmethod
+    def from_metar(cls, metar):
+        """Return the conditions observed in a parsed :class:`Metar`."""
+        return cls(
+            wind_dir=metar.wind_dir,
+            wind_speed=metar.wind_speed,
+            wind_gust=metar.wind_gust,
+            wind_dir_from=metar.wind_dir_from,
+            wind_dir_to=metar.wind_dir_to,
+            vis=metar.vis,
+            vis_dir=metar.vis_dir,
+            max_vis=metar.max_vis,
+            max_vis_dir=metar.max_vis_dir,
+            weather=metar.weather,
+            sky=metar.sky,
+            temp=metar.temp,
+            dewpt=metar.dewpt,
+            press=metar.press,
+            recent=metar.recent,
+            runway=metar.runway,
+            runway_tendencies=metar.runway_tendencies,
+            windshear=metar.windshear,
+            snowdepth=metar.snowdepth,
+        )
+
+    def copy(self):
+        """Return a shallow copy (the element lists are copied as well)."""
+        return Conditions(**{field: getattr(self, field) for field in self.FIELDS})
+
+    def __getitem__(self, key):
+        aliases = {
+            "visibility": "vis",
+            "wind": "wind",
+            "temperature": "temp",
+            "dew_point": "dewpt",
+            "dewpoint": "dewpt",
+            "pressure": "press",
+            "present_weather": "weather",
+            "clouds": "sky",
+            "cloud": "sky",
+            "runway_visual_range": "runway",
+        }
+        field = aliases.get(key, key)
+        if field == "wind":
+            return {
+                "direction": self.wind_dir,
+                "speed": self.wind_speed,
+                "gust": self.wind_gust,
+                "variable_from": self.wind_dir_from,
+                "variable_to": self.wind_dir_to,
+            }
+        if field not in self.FIELDS:
+            raise KeyError(key)
+        return getattr(self, field)
+
+    def get(self, key, default=None):
+        """Mapping-style access with a default."""
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def __contains__(self, key):
+        try:
+            self[key]
+        except KeyError:
+            return False
+        return True
+
+    def __getattr__(self, name):
+        # Friendly aliases such as ``snapshot.visibility``.
+        aliases = {
+            "visibility": "vis",
+            "temperature": "temp",
+            "dew_point": "dewpt",
+            "dewpoint": "dewpt",
+            "pressure": "press",
+            "present_weather": "weather",
+            "clouds": "sky",
+            "cloud": "sky",
+            "runway_visual_range": "runway",
+        }
+        field = aliases.get(name)
+        if field is not None and field != "wind":
+            return object.__getattribute__(self, field)
+        raise AttributeError(name)
+
+    def as_dict(self):
+        """Return the conditions as a plain dictionary."""
+        return {field: getattr(self, field) for field in self.FIELDS}
+
+    def to_dict(self):
+        """Alias for :meth:`as_dict`."""
+        return self.as_dict()
+
+    def wind(self):
+        """Return a dictionary describing the wind."""
+        return self["wind"]
+
+    def weather_text(self):
+        """Return a short textual description of the present weather."""
+        if not self.weather:
+            return ""
+        return Metar._weather(self, self.weather)
+
+    def __repr__(self):
+        parts = []
+        if self.vis is not None:
+            parts.append("vis=%s" % (self.vis,))
+        if self.weather:
+            parts.append("weather=%r" % (self.weather,))
+        if self.sky:
+            parts.append("sky=%r" % (self.sky,))
+        if self.wind_speed is not None:
+            parts.append("wind=%s" % (self.wind_speed,))
+        return "Conditions(%s)" % ", ".join(parts)
+
+
+class TrendSegment(object):
+    """One record in a metar's trend timeline.
+
+    ``kind`` is one of ``"observation"``, ``"becoming"``, ``"temporary"``,
+    ``"forecast"`` or ``"nosig"``.  For a ``becoming`` segment ``start`` and
+    ``end`` bound the period during which the change may happen and
+    ``effective`` is the instant from which the new conditions prevail.  For
+    a ``temporary`` segment ``start``/``end`` are the window in which the
+    temporary phenomenon may occur.  Segment times are complete datetimes,
+    anchored to the date of the report (so a window such as FM2300 TL0100
+    correctly crosses midnight).
+    """
+
+    def __init__(
+        self,
+        kind,
+        start=None,
+        end=None,
+        conditions=None,
+        changes=None,
+        before=None,
+        after=None,
+        effective=None,
+        tokens=None,
+        index=0,
+        uncertain=None,
+        indicator=None,
+        definite=None,
+    ):
+        self.kind = kind
+        self.start = start
+        self.end = end
+        self.conditions = conditions
+        self.changes = changes
+        self.before = before
+        self.after = after
+        self.effective = effective if effective is not None else start
+        self.tokens = list(tokens or [])
+        self.index = index
+        if definite is None:
+            definite = end is None or start is None or end == start
+        self.definite = bool(definite)
+        if uncertain is None:
+            uncertain = start is not None and end is not None and start < end
+        self.uncertain = bool(uncertain)
+        self.indicator = indicator
+
+    # -- timing ------------------------------------------------------------
+    def is_established(self, when):
+        """Return True once the new conditions are definitely in force."""
+        if self.start is None or when < self.start:
+            return False
+        if self.definite:
+            return when >= (self.effective if self.effective is not None else self.start)
+        if self.end is None:
+            return when >= self.start
+        return when >= self.end
+
+    def is_pending(self, when):
+        """Return True while the change may or may not have happened."""
+        if self.start is None or when < self.start:
+            return False
+        if self.definite:
+            return False
+        if self.end is None:
+            return True
+        if self.end <= self.start:
+            return False
+        return when < self.end
+
+    # -- aliases -----------------------------------------------------------
+    @property
+    def type(self):
+        """The code used for this segment (BECMG, TEMPO, ...)."""
+        return self.indicator or self.kind.upper()
+
+    @property
+    def category(self):
+        """Group the segment as observation, permanent or temporary."""
+        if self.kind in ("observation", "nosig"):
+            return "observation"
+        if self.kind == "becoming":
+            return "permanent"
+        return "temporary"
+
+    @property
+    def change(self):
+        """The change indicator, if this is a forecast segment."""
+        return self.indicator
+
+    @property
+    def is_observation(self):
+        return self.kind == "observation"
+
+    @property
+    def is_becoming(self):
+        return self.kind == "becoming"
+
+    @property
+    def is_temporary(self):
+        return self.kind in ("temporary", "forecast")
+
+    @property
+    def is_permanent(self):
+        return self.kind == "becoming"
+
+    @property
+    def window_start(self):
+        return self.start
+
+    @property
+    def window_end(self):
+        return self.end
+
+    @property
+    def begin(self):
+        return self.start
+
+    @property
+    def until(self):
+        return self.end
+
+    @property
+    def valid_from(self):
+        return self.start
+
+    @property
+    def valid_to(self):
+        return self.end
+
+    @property
+    def text(self):
+        return " ".join(self.tokens)
+
+    @property
+    def code(self):
+        return self.text
+
+    @property
+    def midpoint(self):
+        """The midpoint of the segment's time window (or its start)."""
+        if self.start is None:
+            return None
+        if self.end is None or self.end <= self.start:
+            return self.start
+        return self.start + (self.end - self.start) / 2
+
+    @property
+    def duration(self):
+        if self.start is None or self.end is None:
+            return None
+        return self.end - self.start
+
+    def contains(self, when):
+        """Return True when ``when`` lies in this segment's window."""
+        if self.start is None:
+            return False
+        if self.end is None:
+            return when >= self.start
+        if self.end == self.start:
+            return when == self.start
+        return self.start <= when < self.end
+
+    def __getitem__(self, key):
+        if key in ("kind", "type", "category", "start", "end", "effective"):
+            return getattr(self, key)
+        if key in ("conditions", "changes", "before", "after", "uncertain"):
+            return getattr(self, key)
+        if key in ("window_start", "valid_from", "begin"):
+            return self.start
+        if key in ("window_end", "valid_to", "until"):
+            return self.end
+        raise KeyError(key)
+
+    def as_dict(self):
+        """Return a plain dictionary describing the segment."""
+        return {
+            "kind": self.kind,
+            "type": self.type,
+            "category": self.category,
+            "start": self.start,
+            "end": self.end,
+            "effective": self.effective,
+            "uncertain": self.uncertain,
+            "conditions": self.conditions,
+            "changes": self.changes,
+            "tokens": list(self.tokens),
+        }
+
+    def __repr__(self):
+        return "TrendSegment(%s, %s..%s)" % (self.kind, self.start, self.end)
+
+
+class TrendSegmentList(list):
+    """A list of :class:`TrendSegment` that may also be called."""
+
+    def __call__(self):
+        return self
+
+    def at(self, when):
+        """Return the segments whose window contains ``when``."""
+        return TrendSegmentList(segment for segment in self if segment.contains(when))
+
+    def of_kind(self, kind):
+        """Return the segments of a particular kind."""
+        return TrendSegmentList(segment for segment in self if segment.kind == kind)
+
+    @property
+    def observations(self):
+        return self.of_kind("observation")
+
+    @property
+    def becoming(self):
+        return self.of_kind("becoming")
+
+    @property
+    def temporary(self):
+        return TrendSegmentList(
+            segment for segment in self if segment.kind in ("temporary", "forecast")
+        )
+
+    @property
+    def permanent(self):
+        return self.becoming
+
+
+class TrendSnapshot(object):
+    """The conditions at one instant, together with their certainty.
+
+    ``uncertain`` is true when the queried time falls inside a change window
+    (for BECMG) or inside a temporary-weather window (for TEMPO).  In that
+    case ``possible`` contains the alternatives that the report supports;
+    ``conditions`` is the first/expected one, ``prevailing`` is the unmodified
+    underlying state and ``temporary`` lists the overlays that may apply.
+    """
+
+    def __init__(
+        self,
+        time,
+        conditions,
+        uncertain=False,
+        possible=None,
+        prevailing=None,
+        temporary=None,
+        segments=None,
+        status=None,
+    ):
+        self.time = time
+        self.conditions = conditions
+        self.prevailing = prevailing if prevailing is not None else conditions
+        self.underlying = self.prevailing
+        self.uncertain = bool(uncertain)
+        self.possible = list(possible) if possible is not None else [conditions]
+        self.possibilities = self.possible
+        self.temporary = list(temporary or [])
+        self.overlays = self.temporary
+        self.segments = list(segments or [])
+        self.status = status or ("uncertain" if self.uncertain else "certain")
+
+    @property
+    def certain(self):
+        return not self.uncertain
+
+    @property
+    def is_uncertain(self):
+        return self.uncertain
+
+    @property
+    def ambiguous(self):
+        return self.uncertain
+
+    @property
+    def certainty(self):
+        return self.status
+
+    @property
+    def alternatives(self):
+        return self.possible[1:]
+
+    def __getattr__(self, name):
+        # Delegate weather-element access to the primary conditions.
+        if name in Conditions.FIELDS or name in (
+            "visibility",
+            "wind",
+            "temperature",
+            "dew_point",
+            "dewpoint",
+            "pressure",
+            "present_weather",
+            "clouds",
+            "cloud",
+        ):
+            return getattr(self.conditions, name)
+        raise AttributeError(name)
+
+    def __getitem__(self, key):
+        metadata = {
+            "time": self.time,
+            "conditions": self.conditions,
+            "prevailing": self.prevailing,
+            "underlying": self.underlying,
+            "uncertain": self.uncertain,
+            "possible": self.possible,
+            "temporary": self.temporary,
+            "status": self.status,
+        }
+        if key in metadata:
+            return metadata[key]
+        return self.conditions[key]
+
+    def get(self, key, default=None):
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def __contains__(self, key):
+        try:
+            self[key]
+        except KeyError:
+            return False
+        return True
+
+    def as_dict(self):
+        result = self.conditions.as_dict()
+        result.update(
+            {
+                "time": self.time,
+                "uncertain": self.uncertain,
+                "status": self.status,
+                "possible": [state.as_dict() for state in self.possible],
+                "prevailing": self.prevailing.as_dict(),
+                "temporary": list(self.temporary),
+            }
+        )
+        return result
+
+    def to_dict(self):
+        return self.as_dict()
+
+    def __repr__(self):
+        return "TrendSnapshot(%s, %s%s)" % (
+            self.time,
+            self.conditions,
+            ", uncertain" if self.uncertain else "",
+        )
+
+
+class TrendView(object):
+    """A convenient wrapper around a report's trend segments."""
+
+    def __init__(self, metar):
+        self.metar = metar
+        self.segments = metar.trend_segments
+        self.timeline = self.segments
+
+    def __call__(self):
+        return self
+
+    def __iter__(self):
+        return iter(self.segments)
+
+    def __len__(self):
+        return len(self.segments)
+
+    def __getitem__(self, index):
+        return self.segments[index]
+
+    def at(self, when):
+        return self.metar.conditions_at(when)
+
+    def conditions_at(self, when):
+        return self.metar.conditions_at(when)
+
+    def __repr__(self):
+        return "TrendView(%r)" % (self.segments,)
+
+
+# scratch object used to decode trend groups without disturbing the Metar
+class _TrendScratch(object):
+    def __init__(self, station_id=None):
+        self.station_id = station_id
+        self.wind_dir = None
+        self.wind_speed = None
+        self.wind_gust = None
+        self.wind_dir_from = None
+        self.wind_dir_to = None
+        self.vis = None
+        self.vis_dir = None
+        self.max_vis = None
+        self.max_vis_dir = None
+        self.weather = []
+        self.sky = []
+
+
+def _value_key(value):
+    """Return a comparable key for a decoded weather element."""
+    if isinstance(value, (list, tuple)):
+        return tuple(_value_key(item) for item in value)
+    value_method = getattr(value, "value", None)
+    if callable(value_method):
+        try:
+            return value_method()
+        except TypeError:
+            pass
+    return value
+
+
+def _conditions_equal(left, right):
+    """Compare two :class:`Conditions` objects element by element."""
+    for field in Conditions.FIELDS:
+        if _value_key(getattr(left, field)) != _value_key(getattr(right, field)):
+            return False
+    return True
+
+
+def _unique_conditions(states):
+    """Return ``states`` without duplicates, preserving their order."""
+    unique = []
+    for state in states:
+        if not any(_conditions_equal(state, seen) for seen in unique):
+            unique.append(state)
+    return unique
+
+
+def _apply_trend_changes(base, changes):
+    """Return a copy of ``base`` with the explicitly changed elements applied."""
+    if changes is None:
+        return base.copy()
+    if changes.get("cavok"):
+        result = base.copy()
+        result.vis = distance(10000, "M", ">")
+        result.vis_dir = None
+        result.max_vis = None
+        result.max_vis_dir = None
+        result.weather = []
+        result.sky = []
+        result.cavok = True
+        return result
+    result = base.copy()
+    for field in ("wind_dir", "wind_speed", "wind_gust", "wind_dir_from", "wind_dir_to"):
+        if "wind" in changes:
+            setattr(result, field, changes.get(field))
+    for field in ("vis", "vis_dir", "max_vis", "max_vis_dir"):
+        if "visibility" in changes:
+            setattr(result, field, changes.get(field))
+    if "weather" in changes:
+        result.weather = list(changes["weather"])
+    if "sky" in changes:
+        result.sky = list(changes["sky"])
+    if "cavok" in changes:
+        result.cavok = changes["cavok"]
+    for field in ("temp", "dewpt", "press", "snowdepth"):
+        if field in changes:
+            setattr(result, field, changes[field])
+    return result
+
+
+def _decode_trend_conditions(tokens, metar):
+    """Decode the forecast groups following a trend indicator.
+
+    Returns ``(changes, remaining_tokens)``.  ``changes`` only contains the
+    elements that the trend group actually mentions, so applying it to an
+    earlier state preserves everything else.
+    """
+    scratch = _TrendScratch(getattr(metar, "station_id", None))
+    changes = {}
+    remaining = []
+    weather_seen = False
+    sky_seen = False
+    for token in tokens:
+        padded = token + " "
+        match = WIND_RE.match(padded)
+        if match and match.group("dir") is not None:
+            Metar._handleWind(scratch, match.groupdict())
+            changes["wind"] = True
+            for field in (
+                "wind_dir",
+                "wind_speed",
+                "wind_gust",
+                "wind_dir_from",
+                "wind_dir_to",
+            ):
+                changes[field] = getattr(scratch, field)
+            continue
+        match = VISIBILITY_RE.match(padded)
+        if match:
+            Metar._handleVisibility(scratch, match.groupdict())
+            changes["visibility"] = True
+            for field in ("vis", "vis_dir", "max_vis", "max_vis_dir"):
+                changes[field] = getattr(scratch, field)
+            if token.upper() == "CAVOK":
+                changes["cavok"] = True
+            continue
+        match = WEATHER_RE.match(padded)
+        if match:
+            Metar._handleWeather(scratch, match.groupdict())
+            weather_seen = True
+            continue
+        match = SKY_RE.match(padded)
+        if match:
+            Metar._handleSky(scratch, match.groupdict())
+            sky_seen = True
+            continue
+        # Colour codes and unrecognised groups do not describe the weather.
+        remaining.append(token)
+    if weather_seen:
+        if any(weatheri[4] == "NSW" for weatheri in scratch.weather):
+            changes["weather"] = []
+        else:
+            changes["weather"] = list(scratch.weather)
+    if sky_seen:
+        changes["sky"] = list(scratch.sky)
+    return changes, remaining
+
+
+def _parse_trend_time_tokens(tokens):
+    """Split a trend group into its time specification and weather groups.
+
+    ``tokens`` are the raw trend tokens after the indicator.  The returned
+    dictionary has any of ``fm``, ``tl``, ``at``, ``period`` (hour pairs) and
+    ``remaining``.
+    """
+    spec = {"fm": None, "tl": None, "at": None, "period": None}
+    remaining = []
+    for token in tokens:
+        match = TREND_TIME_TOKEN_RE.match(token)
+        if match:
+            value = (int(match.group("hour")), int(match.group("min")))
+            spec[match.group("when").lower()] = value
+            continue
+        remaining.append(token)
+    # Older reports give the change period as two hours, e.g. "BECMG 0306"
+    # for 03:00 to 06:00.  This shorthand only appears as the first group
+    # after the indicator; a later four-digit group is a visibility value.
+    if spec["fm"] is None and spec["tl"] is None and spec["at"] is None:
+        if remaining:
+            match = BARE_TREND_TIME_RE.match(remaining[0])
+            if match:
+                start_hour = int(match.group("hour"))
+                end_hour = int(match.group("min"))
+                if start_hour <= 23 and end_hour <= 23:
+                    spec["period"] = (start_hour, end_hour)
+                    remaining = remaining[1:]
+    spec["remaining"] = remaining
+    return spec
+
+
 # METAR report objects
 debug = False
 
@@ -414,6 +1140,8 @@ class Metar(object):
         self.ice_accretion_6hr = None  # ice accretion over the past 6 hours
         self._trend = False  # trend groups present (bool)
         self._trend_groups = []  # trend forecast groups
+        self._trend_sections = []  # trend groups, split by BECMG/TEMPO indicator
+        self._trend_segments = TrendSegmentList()  # decoded trend timeline
         self._remarks = []  # remarks (list of strings)
         self._unparsed_groups = []
         self._unparsed_remarks = []
@@ -498,6 +1226,11 @@ class Metar(object):
             else:
                 warnings.warn(message, RuntimeWarning)
 
+        # The observation is now known, so the trend groups can be decoded
+        # into a timeline that keeps the observation, the permanent changes
+        # and the temporary overlays apart.
+        self._build_trend_segments()
+
     @property
     def decode_completed(self):
         """
@@ -513,7 +1246,10 @@ class Metar(object):
             while m:
                 if debug:
                     _report_match(handler, m.group())
-                self._trend_groups.append(m.group().strip())
+                group = m.group().strip()
+                self._trend_groups.append(group)
+                if self._trend_sections:
+                    self._trend_sections[-1]["tokens"].append(group)
                 handler(self, m.groupdict())
                 code = code[m.end():]
                 if not repeatable:
@@ -523,6 +1259,393 @@ class Metar(object):
 
     def __str__(self):
         return self.string()
+
+    # -- trend timeline ----------------------------------------------------
+
+    def _trend_anchor(self, day, hour, minute):
+        """Turn a trend time group into a datetime anchored to this report.
+
+        Trend groups carry no day, so they are placed on the observation day.
+        A time more than 12 hours behind the observation belongs to the next
+        day; that keeps windows such as FM2300 TL0100 and reports issued just
+        before midnight on one continuous timeline.
+        """
+        if day is None or self.time is None:
+            return None
+        candidate = datetime.datetime(
+            self.time.year, self.time.month, self.time.day, hour, minute
+        )
+        if self.time.month is not None and day != self.time.day:
+            # Rare reports put the day in the trend time group.  Only accept
+            # it when it is a plausible neighbour of the observation day.
+            base = datetime.datetime(
+                self.time.year, self.time.month, max(1, self.time.day)
+            )
+            delta = day - self.time.day
+            if delta < 0:
+                delta += calendar.monthrange(self.time.year, self.time.month)[1]
+            candidate = base + datetime.timedelta(days=delta)
+        if candidate < self.time - datetime.timedelta(hours=12):
+            candidate += datetime.timedelta(days=1)
+        return candidate
+
+    def _trend_time(self, value, reference=None):
+        """Resolve a trend time tuple ``(hour, minute)`` to a datetime.
+
+        Trend groups carry no date.  A start time is placed at the first
+        occurrence at or after the observation, and an end time at the first
+        occurrence at or after the start.  Anchoring both ends to the report
+        this way keeps a window that crosses midnight (FM2300 TL0100) on one
+        continuous timeline instead of letting each end pick its own day.
+        """
+        if value is None:
+            return None
+        hour, minute = value
+        anchor = reference if reference is not None else self.time
+        if anchor is None:
+            return None
+        candidate = anchor.replace(
+            hour=int(hour), minute=int(minute), second=0, microsecond=0
+        )
+        if reference is not None:
+            while candidate < reference:
+                candidate += datetime.timedelta(days=1)
+            return candidate
+        while candidate < self.time:
+            candidate += datetime.timedelta(days=1)
+        return candidate
+
+    def _trend_period_end(self, start=None):
+        """Return the end of the report's trend period.
+
+        A trend forecast covers the period from the observation (or the given
+        start) up to two hours later.  It is used when a trend group omits its
+        time specification altogether.
+        """
+        base = start if start is not None else self.time
+        if base is None:
+            return None
+        return base + datetime.timedelta(hours=2)
+
+    def _trend_window(self, spec):
+        """Return ``(start, end, effective, definite)`` for a trend group.
+
+        ``definite`` is True only when the group names the instant the change
+        takes effect (FM or AT).  A change window (``FM...TL...``, ``TL``
+        alone or the older two-hour shorthand) leaves the exact instant open,
+        so queries inside the window are reported as uncertain.  A group with
+        no time at all applies to the report's two-hour trend period.
+        """
+        frm = self._trend_time(spec.get("fm"))
+        til = self._trend_time(spec.get("tl"), reference=frm)
+        at = self._trend_time(spec.get("at"))
+        period = spec.get("period")
+        if period is not None:
+            start_hour, end_hour = period
+            start = self._trend_time((start_hour, 0))
+            end = self._trend_time((end_hour, 0), reference=start)
+            return start, end, None, False
+        if frm is not None and til is not None:
+            return frm, til, None, False
+        if frm is not None:
+            return frm, frm, frm, True
+        if at is not None:
+            return at, at, at, True
+        if til is not None:
+            # Only the end of the change window is known, so the change can
+            # happen anywhere from now until then.
+            return self.time, til, None, False
+        return self.time, self._trend_period_end(), None, False
+
+    def _build_trend_segments(self):
+        """Decode ``_trend_sections`` into ``_trend_segments``."""
+        self._trend_segments = TrendSegmentList()
+        if self.time is None:
+            return
+        state = Conditions.from_metar(self)
+        observation = TrendSegment(
+            "observation",
+            start=self.time,
+            end=None,
+            conditions=state.copy(),
+            index=0,
+            uncertain=False,
+        )
+        self._trend_segments.append(observation)
+        if not self._trend_sections:
+            return
+
+        # The observation prevails until the first permanent change takes
+        # effect.  Temporary overlays can occur anywhere in the trend period.
+        first_becoming = None
+        index = 1
+        for section in self._trend_sections:
+            indicator = section["indicator"]
+            tokens = section["tokens"]
+            spec = _parse_trend_time_tokens(tokens)
+            changes, _ = _decode_trend_conditions(spec["remaining"], self)
+            start, end, effective, definite = self._trend_window(spec)
+            if indicator == "NOSIG":
+                continue
+            if indicator == "BECMG":
+                before = state.copy()
+                after = _apply_trend_changes(state, changes)
+                state = after
+                if first_becoming is None:
+                    first_becoming = effective if effective is not None else end
+                segment = TrendSegment(
+                    "becoming",
+                    start=start,
+                    end=end,
+                    conditions=after.copy(),
+                    changes=changes,
+                    before=before,
+                    after=after.copy(),
+                    effective=effective,
+                    tokens=[indicator] + list(tokens),
+                    index=index,
+                    indicator=indicator,
+                    definite=definite,
+                )
+            elif indicator in ("TEMPO", "FCST"):
+                # "TEMPO FMhhmm" without a TL leaves the end of the temporary
+                # period implicit.  The trend forecast period is at most two
+                # hours, so keep the overlay visible that long rather than
+                # letting it vanish at the instant it begins.
+                if (
+                    indicator == "TEMPO"
+                    and spec.get("fm") is not None
+                    and spec.get("tl") is None
+                    and start is not None
+                    and end == start
+                ):
+                    end = start + datetime.timedelta(hours=2)
+                    definite = False
+                base = state.copy()
+                overlay = _apply_trend_changes(base, changes)
+                segment = TrendSegment(
+                    "temporary" if indicator == "TEMPO" else "forecast",
+                    start=start,
+                    end=end,
+                    conditions=overlay,
+                    changes=changes,
+                    before=base,
+                    after=None,
+                    effective=effective,
+                    tokens=[indicator] + list(tokens),
+                    index=index,
+                    indicator=indicator,
+                    definite=definite,
+                )
+            else:
+                segment = TrendSegment(
+                    indicator.lower(),
+                    start=start,
+                    end=end,
+                    conditions=state.copy(),
+                    changes=changes,
+                    tokens=[indicator] + list(tokens),
+                    index=index,
+                    indicator=indicator,
+                    definite=definite,
+                )
+            self._trend_segments.append(segment)
+            index += 1
+
+        # The observation segment lasts until the first permanent change is
+        # fully established (or the last trend window closes).
+        observation_end = first_becoming
+        if observation_end is None:
+            ends = [segment.end for segment in self._trend_segments[1:] if segment.end]
+            observation_end = max(ends) if ends else None
+        if observation_end is not None:
+            self._trend_segments[0].end = observation_end
+
+    @property
+    def observed_conditions(self):
+        """The conditions observed by the report, without any trend applied."""
+        return Conditions.from_metar(self)
+
+    @property
+    def trend_segments(self):
+        """The report's trend timeline as a :class:`TrendSegmentList`.
+
+        The first segment is the observation.  Each BECMG group adds a
+        permanent change and each TEMPO group adds a temporary overlay; the
+        trend text itself remains available through :meth:`trend`.
+        """
+        return self._trend_segments
+
+    @property
+    def trend_sections(self):
+        """The trend groups split by indicator: ``[{"type": ..., "groups": ...}]``."""
+        return [
+            {
+                "type": section["indicator"],
+                "indicator": section["indicator"],
+                "groups": list(section["tokens"]),
+                "text": " ".join([section["indicator"]] + section["tokens"]),
+            }
+            for section in self._trend_sections
+        ]
+
+    def trend_view(self):
+        """Return a :class:`TrendView` for this report."""
+        return TrendView(self)
+
+    @property
+    def trend_timeline(self):
+        """Alias for :attr:`trend_segments`."""
+        return self._trend_segments
+
+    @property
+    def trend_periods(self):
+        """Alias for :attr:`trend_segments`."""
+        return self._trend_segments
+
+    def segments(self):
+        """Return the report's trend timeline (observations and forecasts)."""
+        return self._trend_segments
+
+    def forecast_at(self, when, include_temporary=True):
+        """Alias for :meth:`conditions_at`."""
+        return self.conditions_at(when, include_temporary=include_temporary)
+
+    def conditions(self, when, include_temporary=True):
+        """Alias for :meth:`conditions_at`."""
+        return self.conditions_at(when, include_temporary=include_temporary)
+
+    def conditions_at(self, when, include_temporary=True):
+        """Return the conditions at ``when`` as a :class:`TrendSnapshot`.
+
+        ``when`` is a datetime (or a ``(hour, minute)`` pair resolved against
+        the report's date, or an ``"HHMM"`` string).  Permanent BECMG changes
+        take effect at their effective time; temporary TEMPO overlays apply
+        only inside their own window and expire afterwards, at which point the
+        underlying permanent state that is in force at that time is restored.
+        When the report gives only a change window without an exact effective
+        instant, the queried time has ``uncertain`` set and ``possible`` lists
+        the alternatives the report supports rather than silently choosing
+        one.
+        """
+        time = self._resolve_query_time(when)
+        if time is None or not self._trend_segments:
+            raise ValueError("cannot resolve the query time for this report")
+
+        underlying = [self._trend_segments[0].conditions.copy()]
+        established = underlying[0].copy()
+        uncertain = False
+        active_segments = []
+
+        for segment in self._trend_segments[1:]:
+            if segment.kind == "becoming":
+                if segment.is_established(time):
+                    established = segment.conditions.copy()
+                    underlying = [established.copy()]
+                elif segment.is_pending(time):
+                    # The change may or may not have happened by now.
+                    uncertain = True
+                    underlying = [segment.conditions.copy()] + [
+                        state.copy() for state in underlying
+                    ]
+                    active_segments.append(segment)
+            elif segment.kind in ("temporary", "forecast"):
+                if segment.contains(time):
+                    active_segments.append(segment)
+
+        active_temporary = [
+            segment
+            for segment in active_segments
+            if segment.kind in ("temporary", "forecast")
+        ]
+        # ``prevailing`` is the state that would prevail without any temporary
+        # overlay: the last definitely established state.
+        prevailing = established.copy()
+
+        possible_states = []
+        if include_temporary and active_temporary:
+            uncertain = True
+            for base in underlying:
+                state = base.copy()
+                for segment in active_temporary:
+                    state = _apply_trend_changes(state, segment.changes)
+                possible_states.append(state)
+            # The temporary phenomenon is possible, not certain, so the
+            # unmodified underlying states remain alternatives as well.
+            possible_states.extend(state.copy() for state in underlying)
+            possible_states = _unique_conditions(possible_states)
+            conditions = possible_states[0]
+        else:
+            possible_states = _unique_conditions(
+                [state.copy() for state in underlying]
+            )
+            conditions = possible_states[0]
+
+        if not uncertain:
+            possible_states = [conditions]
+
+        return TrendSnapshot(
+            time=time,
+            conditions=conditions,
+            uncertain=uncertain,
+            possible=possible_states,
+            prevailing=prevailing,
+            temporary=active_temporary,
+            segments=active_segments,
+            status="uncertain" if uncertain else "certain",
+        )
+
+    def _resolve_query_time(self, when):
+        """Resolve a query time argument against the report's date."""
+        if self.time is None:
+            return None
+        if isinstance(when, datetime.datetime):
+            if when.tzinfo is not None:
+                when = when.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+            return when
+        if isinstance(when, datetime.time):
+            return self._resolve_clock(when.hour, when.minute)
+        if isinstance(when, str):
+            text = when.strip().upper()
+            if text.endswith("Z"):
+                text = text[:-1]
+            for prefix in ("AT", "FM", "TL"):
+                if text.startswith(prefix):
+                    text = text[len(prefix):]
+            if len(text) == 4 and text.isdigit():
+                return self._resolve_clock(int(text[:2]), int(text[2:]))
+            raise ValueError("cannot interpret %r as a trend time" % (when,))
+        if isinstance(when, (tuple, list)) and len(when) == 2:
+            return self._resolve_clock(int(when[0]), int(when[1]))
+        raise ValueError("cannot interpret %r as a trend time" % (when,))
+
+    def _resolve_clock(self, hour, minute):
+        """Place an ``(hour, minute)`` query on the report's timeline.
+
+        Trend groups carry no date, so a clock time is matched against the
+        report's windows first.  That keeps a query on either side of midnight
+        on the same timeline as the window it belongs to.  When no window
+        contains the time, the nearest instant after the observation wins.
+        """
+        base = self.time
+        candidates = [
+            base.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            + datetime.timedelta(days=offset)
+            for offset in (-1, 0, 1)
+        ]
+        for candidate in candidates:
+            for segment in self._trend_segments[1:]:
+                if segment.start is None:
+                    continue
+                if segment.end is None:
+                    if candidate >= segment.start:
+                        return candidate
+                elif segment.start <= candidate <= segment.end:
+                    return candidate
+        forward = [c for c in candidates if c >= base]
+        if forward:
+            return min(forward)
+        return max(candidates)
 
     def _handleType(self, d):
         """
@@ -855,9 +1978,14 @@ class Metar(object):
     def _handleTrend(self, d):
         """
         Parse (and ignore) the trend groups.
+
+        Each indicator (BECMG, TEMPO, FCST, NOSIG) opens a section; the
+        following tokens belong to it until the next indicator.
         """
         if "trend" in d:
+            indicator = d["trend"].upper()
             self._trend_groups.append(d["trend"])
+            self._trend_sections.append({"indicator": indicator, "tokens": []})
         self._trend = True
 
     def _startRemarks(self, d):

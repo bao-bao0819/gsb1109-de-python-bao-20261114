@@ -1,6 +1,16 @@
 Change Log
 ==========
 
+Unreleased
+
+- Decode trend groups into a timeline instead of keeping them only as text.
+  `Metar.trend_segments` records the observation, each permanent `BECMG`
+  change and each temporary `TEMPO`/`FCST` overlay separately.
+  `Metar.conditions_at()` composes them for a given time, keeps windows that
+  cross midnight on the report's timeline, restores the then-effective
+  permanent state when a temporary phenomenon expires, and marks queries
+  inside an open-ended change window as uncertain.
+
 metar-2.0.2 (26 October 2026)
 
 - Infer a month when METAR day is ambiguous and day of the month does not

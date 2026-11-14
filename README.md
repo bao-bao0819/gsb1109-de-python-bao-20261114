@@ -106,6 +106,54 @@ tendency, or `None` when no unambiguous tendency was reported. These describe
 the reported past tendency; no trend is inferred from the range values.
 `obs.runway_visual_range()` includes the tendency when available.
 
+Trend timeline
+------------------------------------------------------------------------
+
+Trend groups (`BECMG`, `TEMPO`, `FCST` and `NOSIG`) remain available as text
+through `obs.trend()`, but they are also decoded into a timeline. The first
+segment is always the observation itself:
+
+```python
+>>> obs = Metar.Metar(
+...     "KEWR 101651Z 09010KT 10SM -SN OVC020 23/05 Q1001 "
+...     "BECMG FM2300 TL0000 3000 TSRA "
+...     "TEMPO FM0000 TL0100 1/2SM +RA"
+... , month=6, year=2026)
+>>> [(s.kind, s.start, s.end) for s in obs.trend_segments]
+[('observation', datetime(2026, 6, 10, 16, 51), datetime(2026, 6, 11, 0, 0)),
+ ('becoming', datetime(2026, 6, 10, 23, 0), datetime(2026, 6, 11, 0, 0)),
+ ('temporary', datetime(2026, 6, 11, 0, 0), datetime(2026, 6, 11, 1, 0))]
+```
+
+`obs.trend_segments` is a list of `TrendSegment` records. A `becoming`
+segment holds the permanent change, with `before` and `after` conditions and
+the `effective` instant; a `temporary` segment holds only the overlay in
+`conditions` and keeps the state it overlays in `before`. `obs.trend_sections`
+groups the raw trend groups under the indicator that introduced them.
+
+`obs.conditions_at(when)` composes the timeline into a `TrendSnapshot`. `when`
+may be a `datetime`, an `"HHMM"` string or an `(hour, minute)` pair. Trend
+groups carry no date, so both the windows and the query are anchored to the
+report: a window such as `FM2300 TL0100` crosses midnight as one continuous
+period. Temporary weather applies only inside its own window; once it expires,
+the snapshot falls back to the permanent state in force at that time:
+
+```python
+>>> obs.conditions_at("0030").conditions.vis.string("SM")
+'0.50 miles'                           # the active TEMPO overlay
+>>> obs.conditions_at("0130").conditions.vis.value("M")
+3000.0                                 # TEMPO expired; BECMG state restored
+```
+
+A change may be given as a window without an exact instant, e.g.
+`BECMG 0306 VRB06KT`. Queries inside that window are then marked uncertain:
+`snapshot.uncertain` is `True`, `snapshot.possible` lists both the pre-change
+and the post-change conditions, and `snapshot.prevailing` is the state before
+the change. A query at the midpoint or anywhere else in the window therefore
+shows the ambiguity instead of silently choosing one outcome. `FM` and `AT`
+name an exact instant and produce a certain snapshot from that moment on.
+`include_temporary=False` returns the permanent state only.
+
 See the sample.py script for an annonated demonstration of the use
 of this code.  Just as an appetizer, here's an interactive example...
 

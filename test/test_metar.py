@@ -848,3 +848,183 @@ def test_issue167_impossible_day_still_raises(monkeypatch):
     _fixed_now(monkeypatch, datetime(2026, 1, 15, 12, 0))
     with pytest.raises(Metar.ParserError):
         Metar.Metar("KUAO 320053Z AUTO 31009KT 10SM -RA FEW046 BKN055 OVC070 05/00")
+
+
+# ---------------------------------------------------------------------------
+# Trend timeline (BECMG / TEMPO) tests
+# ---------------------------------------------------------------------------
+
+TREND_BASE = "KEWR 101651Z 09010KT 10SM -SN OVC020 23/05 Q1001 "
+
+
+def _trend_report(trend, month=6, year=2026):
+    return Metar.Metar(TREND_BASE + trend, month=month, year=year)
+
+
+def test_trend_segments_keep_observation_and_forecasts_apart():
+    """The timeline starts with the observation, then BECMG and TEMPO."""
+    report = _trend_report(
+        "BECMG FM0300 TL0400 3000 TSRA BKN030CU TEMPO FM0400 TL0430 1/2SM +RA"
+    )
+    kinds = [segment.kind for segment in report.trend_segments]
+    assert kinds == ["observation", "becoming", "temporary"]
+
+    observation, becoming, temporary = report.trend_segments
+    assert observation.is_observation
+    assert becoming.is_permanent and becoming.indicator == "BECMG"
+    assert temporary.is_temporary and temporary.indicator == "TEMPO"
+
+    # The original observation attributes are untouched by the trend groups.
+    assert report.vis.value("SM") == 10.0
+    assert report.weather == [("-", None, "SN", None, None)]
+
+    # The permanent change carries the state after it; the temporary one only
+    # holds the overlay on top of that state.
+    assert becoming.conditions.vis.value("M") == 3000.0
+    assert becoming.conditions.weather == [("", "TS", "RA", None, None)]
+    assert temporary.conditions.vis.value("SM") == 0.5
+    assert temporary.conditions.weather == [("+", None, "RA", None, None)]
+    # A temporary segment is an overlay, so it keeps the state it overlays.
+    assert temporary.before.vis.value("M") == 3000.0
+    assert temporary.after is None
+
+
+def test_trend_segments_split_by_indicator():
+    """trend() text is retained, but the groups are also split by indicator."""
+    report = _trend_report(
+        "BECMG FM0920 TL0930 3000 TSRA BECMG FM1000 TL1020 6000 NSW"
+    )
+    assert len(report.trend_sections) == 2
+    assert [section["type"] for section in report.trend_sections] == ["BECMG", "BECMG"]
+    assert report.trend_sections[0]["groups"] == ["FM0920", "TL0930", "3000", "TSRA"]
+    assert (
+        report.trend()
+        == "BECMG FM0920 TL0930 3000 TSRA BECMG FM1000 TL1020 6000 NSW"
+    )
+
+
+def test_trend_window_midnight_follows_one_report():
+    """A window spanning midnight stays on the report's timeline."""
+    report = _trend_report("TEMPO FM2300 TL0100 1/2SM +RA")
+    temporary = report.trend_segments.temporary[0]
+    assert temporary.start == datetime(2026, 6, 10, 23, 0)
+    assert temporary.end == datetime(2026, 6, 11, 1, 0)
+
+    assert report.conditions_at("2200").uncertain is False
+    assert report.conditions_at("2300").uncertain is True
+    assert report.conditions_at("0000").uncertain is True
+    assert report.conditions_at("0100").conditions.vis.value("SM") == 10.0
+    assert report.conditions_at("0100").uncertain is False
+
+
+def test_temporary_expires_to_then_effective_base():
+    """Expired temporary weather restores the BECMG state in force then."""
+    report = _trend_report(
+        "BECMG FM0300 TL0400 3000 TSRA TEMPO FM0430 TL0500 1/2SM +RA"
+    )
+    # Inside the TEMPO window the overlay is visible...
+    during = report.conditions_at("0445")
+    assert during.uncertain is True
+    assert during.conditions.vis.value("SM") == 0.5
+    # ...and after it expires the permanent BECMG state is back.
+    after = report.conditions_at("0530")
+    assert after.uncertain is False
+    assert after.conditions.vis.value("M") == 3000.0
+    assert after.conditions.weather == [("", "TS", "RA", None, None)]
+
+
+def test_becoming_window_midpoint_is_uncertain():
+    """A change window without an exact instant leaves the midpoint open."""
+    report = _trend_report("BECMG 0306 VRB06KT")
+    becoming = report.trend_segments.becoming[0]
+    assert becoming.start == datetime(2026, 6, 11, 3, 0)
+    assert becoming.end == datetime(2026, 6, 11, 6, 0)
+    assert becoming.definite is False
+
+    midpoint = becoming.midpoint
+    assert midpoint == datetime(2026, 6, 11, 4, 30)
+    snapshot = report.conditions_at(midpoint)
+    assert snapshot.uncertain is True
+    assert len(snapshot.possible) == 2
+    assert snapshot.prevailing.wind_speed.value("KT") == 10.0
+    assert snapshot.conditions.wind_speed.value("KT") == 6.0
+
+    # At/after the end of the window the change is settled.
+    settled = report.conditions_at("0600")
+    assert settled.uncertain is False
+    assert settled.conditions.wind_speed.value("KT") == 6.0
+
+
+def test_exact_fm_instant_is_certain():
+    """FM names the instant a change takes effect, so it is not uncertain."""
+    report = _trend_report("BECMG FM0300 3000")
+    before = report.conditions_at("0259")
+    at = report.conditions_at("0300")
+    assert before.uncertain is False
+    assert at.uncertain is False
+    assert before.conditions.vis.value("SM") == 10.0
+    assert at.conditions.vis.value("M") == 3000.0
+
+
+def test_trend_snapshot_weather_aliases():
+    """Snapshots expose the weather elements directly."""
+    report = _trend_report("TEMPO FM0400 TL0500 1/2SM +RA")
+    snapshot = report.conditions_at("0430")
+    assert snapshot["visibility"].value("SM") == 0.5
+    assert snapshot.visibility.value("SM") == 0.5
+    assert snapshot.conditions.weather == [("+", None, "RA", None, None)]
+    assert snapshot.certainty == "uncertain"
+    assert snapshot.underlying.vis.value("SM") == 10.0
+
+
+def test_observation_and_timeline_untouched_without_trends():
+    """A report without a trend still has a single observation segment."""
+    report = Metar.Metar(TREND_BASE + "NOSIG", month=6, year=2026)
+    assert [segment.kind for segment in report.trend_segments] == ["observation"]
+    snapshot = report.conditions_at("1700")
+    assert snapshot.uncertain is False
+    assert snapshot.conditions.vis.value("SM") == 10.0
+
+
+def test_becmg_inside_temporary_window_updates_overlay_base():
+    """A permanent change during a TEMPO window changes what the overlay sits on."""
+    report = _trend_report(
+        "TEMPO FM0300 TL0500 1/2SM +RA BECMG FM0400 TL0430 5000 BR"
+    )
+    # Before the BECMG window the TEMPO overlay sits on the observation.
+    early = report.conditions_at("0330")
+    assert early.uncertain is True
+    assert early.conditions.vis.value("SM") == 0.5
+    # Inside the BECMG window both the overlay and the underlying change are
+    # possible, so the snapshot carries more than one alternative.
+    middle = report.conditions_at("0415")
+    assert middle.uncertain is True
+    assert len(middle.possible) >= 2
+    # After the change has settled the TEMPO overlay still applies, now on
+    # the post-BECMG state.
+    late = report.conditions_at("0445")
+    assert late.uncertain is True
+    assert late.conditions.vis.value("SM") == 0.5
+    assert late.prevailing.vis.value("M") == 5000.0
+
+
+def test_overlapping_temporary_overlays_apply_in_order():
+    """Successive TEMPO groups are overlaid in report order."""
+    report = _trend_report(
+        "TEMPO FM0400 TL0430 3000 BR TEMPO FM0415 TL0500 1/2SM +RA"
+    )
+    both = report.conditions_at("0420")
+    assert both.uncertain is True
+    assert both.conditions.vis.value("SM") == 0.5
+    assert both.conditions.weather == [("+", None, "RA", None, None)]
+    only_second = report.conditions_at("0445")
+    assert only_second.conditions.vis.value("SM") == 0.5
+    assert only_second.conditions.weather == [("+", None, "RA", None, None)]
+
+
+def test_trend_sections_nosig_is_kept():
+    """NOSIG is recorded as a section but adds no change to the timeline."""
+    report = _trend_report("NOSIG")
+    assert report.trend_sections[0]["type"] == "NOSIG"
+    assert [segment.kind for segment in report.trend_segments] == ["observation"]
+    assert report.conditions_at("1800").uncertain is False
