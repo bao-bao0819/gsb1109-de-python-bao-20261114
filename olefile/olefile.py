@@ -1969,6 +1969,179 @@ class OleFileIO:
             raise IOError("this file is not a stream")
         return self._open(entry.isectStart, entry.size)
 
+    def _follow_chain(self, start_sect, fat, nb_sectors):
+        """
+        Follow a sector chain in the FAT or the MiniFAT, collecting up to
+        nb_sectors sector indexes in logical order.
+
+        :param start_sect: index of the first sector of the chain
+        :param fat: FAT or MiniFAT array of sector indexes
+        :param nb_sectors: number of sectors to collect
+        :returns: tuple (chain, complete). chain is the list of sector
+            indexes in logical order. complete is True only if nb_sectors
+            sectors were collected; it is False when the chain ended
+            prematurely (ENDOFCHAIN, free/special sector marker, index out
+            of range, or a loop), which indicates a corrupt chain.
+        """
+        chain = []
+        seen = set()
+        sect = start_sect
+        while len(chain) < nb_sectors:
+            if sect == ENDOFCHAIN:
+                break
+            # sect < 0 should not happen, and special markers (FREESECT,
+            # FATSECT, DIFSECT) as well as out-of-range indexes are all
+            # caught by sect >= len(fat):
+            if sect < 0 or sect >= len(fat):
+                break
+            if sect in seen:
+                # loop in the chain, it is corrupt:
+                break
+            seen.add(sect)
+            chain.append(sect)
+            sect = fat[sect] & 0xFFFFFFFF  # JYTHON-WORKAROUND
+        return chain, len(chain) >= nb_sectors
+
+    def get_stream_fragments(self, filename, offset=0, size=None):
+        """
+        Map a logical byte range of a stream to the physical fragments of
+        the OLE file it is stored in, in logical order.
+
+        The range is the half-open interval [offset, offset+size), clamped
+        to the actual stream size. For a standard stream, fragments point
+        to sectors of the FAT chain. For a mini stream (size below the
+        MiniFAT cutoff), fragments are first located in the MiniFAT chain
+        and then mapped through the mini stream, i.e. the FAT chain of the
+        root storage. Consecutive bytes are merged into a single fragment
+        only when they are also physically contiguous in the file, so that
+        concatenating the fragments read from the file yields exactly the
+        requested stream slice, without any byte in between.
+
+        :param filename: path of stream in storage tree (except root entry),
+            as for openstream.
+        :param offset: logical offset of the first byte, 0 by default.
+        :param size: number of bytes, or None (default) to map up to the
+            end of the stream.
+        :returns: tuple (fragments, broken_at). fragments is a list of
+            (file_offset, length) tuples in logical order. broken_at is
+            None if the whole requested range is backed by a valid sector
+            chain; otherwise it is the logical stream offset from which
+            the chain is corrupt and the data can no longer be verified
+            (fragments then only cover the bytes before broken_at).
+        :exception IOError: if filename not found, or if this is not a stream.
+        :exception ValueError: if offset or size is negative.
+        """
+        sid = self._find(filename)
+        entry = self.direntries[sid]
+        if entry.entry_type != STGTY_STREAM:
+            raise IOError("this file is not a stream")
+        if offset < 0:
+            raise ValueError("offset must be >= 0")
+        if size is None:
+            end = entry.size
+        else:
+            if size < 0:
+                raise ValueError("size must be >= 0")
+            end = min(offset + size, entry.size)
+        if offset >= end:
+            # empty range (or beyond the end of the stream):
+            return [], None
+        if entry.is_minifat:
+            return self._minifat_fragments(entry, offset, end)
+        else:
+            return self._fat_fragments(entry.isectStart, offset, end)
+
+    def _fat_fragments(self, start_sect, offset, end):
+        """
+        Build the fragment list for a range of a standard (FAT) stream.
+        Helper for get_stream_fragments, returns (fragments, broken_at).
+        """
+        unit = self.sectorsize
+        last_unit = (end - 1) // unit
+        chain, complete = self._follow_chain(start_sect, self.fat,
+                                             last_unit + 1)
+        broken_at = None
+        if not complete:
+            # the chain is corrupt: bytes from the first missing sector
+            # onward cannot be verified:
+            broken_at = len(chain) * unit
+            end = min(end, broken_at)
+        fragments = []
+        pos = offset
+        while pos < end:
+            unit_index = pos // unit
+            in_unit = pos % unit
+            length = min(unit - in_unit, end - pos)
+            # sector 0 of the file starts right after the header:
+            file_offset = self.sectorsize * (chain[unit_index] + 1) + in_unit
+            self._append_fragment(fragments, file_offset, length)
+            pos += length
+        return fragments, broken_at
+
+    def _minifat_fragments(self, entry, offset, end):
+        """
+        Build the fragment list for a range of a mini stream, mapping each
+        mini sector through the mini stream (the FAT chain of the root
+        storage). Helper for get_stream_fragments, returns
+        (fragments, broken_at).
+        """
+        if not self.minifat:
+            self.loadminifat()
+        unit = self.minisectorsize
+        last_unit = (end - 1) // unit
+        chain, complete = self._follow_chain(entry.isectStart, self.minifat,
+                                             last_unit + 1)
+        broken_at = None
+        if not complete:
+            broken_at = len(chain) * unit
+            end = min(end, broken_at)
+        # map the needed mini sectors through the mini stream of the root
+        # storage: mini sector m is stored at byte m*minisectorsize of the
+        # mini stream, which is itself a FAT chain:
+        root_unit = self.sectorsize
+        root_chain = []
+        if end > offset:
+            used = chain[:(end + unit - 1) // unit]
+            max_mini_byte = max(m * unit + unit for m in used)
+            nb_root = (max_mini_byte - 1) // root_unit + 1
+            root_chain, root_complete = self._follow_chain(
+                self.root.isectStart, self.fat, nb_root)
+            if not root_complete:
+                # mini stream bytes from this point onward cannot be
+                # verified; find the first logical stream offset affected:
+                lost_mini = (len(root_chain) * root_unit) // unit
+                for i, m in enumerate(used):
+                    if m >= lost_mini:
+                        root_broken = i * unit
+                        if broken_at is None or root_broken < broken_at:
+                            broken_at = root_broken
+                            end = min(end, broken_at)
+                        break
+        fragments = []
+        pos = offset
+        while pos < end:
+            unit_index = pos // unit
+            in_unit = pos % unit
+            length = min(unit - in_unit, end - pos)
+            mini_byte = chain[unit_index] * unit
+            root_sect = root_chain[mini_byte // root_unit]
+            file_offset = (self.sectorsize * (root_sect + 1)
+                           + mini_byte % root_unit + in_unit)
+            self._append_fragment(fragments, file_offset, length)
+            pos += length
+        return fragments, broken_at
+
+    @staticmethod
+    def _append_fragment(fragments, file_offset, length):
+        """
+        Append a (file_offset, length) fragment to the list, merging it
+        with the previous one when they are physically contiguous.
+        """
+        if fragments and fragments[-1][0] + fragments[-1][1] == file_offset:
+            fragments[-1] = (fragments[-1][0], fragments[-1][1] + length)
+        else:
+            fragments.append((file_offset, length))
+
     def _write_mini_stream(self, entry, data_to_write):
         if not entry.sect_chain:
             entry.build_sect_chain(self)

@@ -209,6 +209,201 @@ class TestOleFileIO(unittest.TestCase):
                 ole.write_sect(ole.nb_sect - 1, b"x" * size)
 
 
+class TestGetStreamFragments(unittest.TestCase):
+    'Tests for the OleFileIO.get_stream_fragments method'
+
+    def setUp(self):
+        self.ole_file = u"tests/images/test-ole-file.doc"
+
+    @staticmethod
+    def reassemble(ole, fragments):
+        'Read fragments from the OLE file and concatenate them'
+        data = []
+        for file_offset, length in fragments:
+            ole.fp.seek(file_offset)
+            data.append(ole.fp.read(length))
+        return b"".join(data)
+
+    def test_full_stream_matches_openstream(self):
+        'Fragments of a whole stream reassemble to the openstream content'
+        ole = olefile.OleFileIO(self.ole_file)
+        for path in ole.listdir():
+            expected = ole.openstream(path).read()
+            fragments, broken_at = ole.get_stream_fragments(path)
+            self.assertIsNone(broken_at)
+            self.assertEqual(self.reassemble(ole, fragments), expected)
+        ole.close()
+
+    def test_half_open_ranges(self):
+        'Fragments of a half-open range reassemble to the matching slice'
+        ole = olefile.OleFileIO(self.ole_file)
+        for path in ole.listdir():
+            data = ole.openstream(path).read()
+            nb_bytes = len(data)
+            step = max(1, nb_bytes // 7)
+            for offset in range(0, nb_bytes + 1, step):
+                for size in (0, 1, 63, 64, 65, 511, 512, 513, 4096, nb_bytes):
+                    fragments, broken_at = ole.get_stream_fragments(
+                        path, offset, size)
+                    self.assertIsNone(broken_at)
+                    self.assertEqual(self.reassemble(ole, fragments),
+                                     data[offset:offset + size])
+        ole.close()
+
+    def test_fragments_are_maximal(self):
+        'Consecutive fragments are never physically contiguous'
+        ole = olefile.OleFileIO(self.ole_file)
+        for path in ole.listdir():
+            fragments, broken_at = ole.get_stream_fragments(path)
+            for first, second in zip(fragments, fragments[1:]):
+                self.assertNotEqual(first[0] + first[1], second[0])
+        ole.close()
+
+    def test_mini_stream_maps_through_root_storage(self):
+        'Mini stream fragments are located inside the root storage sectors'
+        ole = olefile.OleFileIO(self.ole_file)
+        nb_root_sect = (ole.root.size + ole.sectorsize - 1) // ole.sectorsize
+        root_chain, complete = ole._follow_chain(ole.root.isectStart,
+                                                 ole.fat, nb_root_sect)
+        self.assertTrue(complete)
+        root_sectors = set(root_chain)
+        for path in ole.listdir():
+            entry = ole.direntries[ole._find(path)]
+            if not entry.is_minifat:
+                continue
+            fragments, broken_at = ole.get_stream_fragments(path)
+            self.assertIsNone(broken_at)
+            for file_offset, length in fragments:
+                sector = file_offset // ole.sectorsize - 1
+                self.assertIn(sector, root_sectors)
+        ole.close()
+
+    def test_range_clamped_to_stream_size(self):
+        'A size beyond the end of the stream is clamped'
+        ole = olefile.OleFileIO(self.ole_file)
+        data = ole.openstream('worddocument').read()
+        fragments, broken_at = ole.get_stream_fragments(
+            'worddocument', 100, len(data) * 2)
+        self.assertIsNone(broken_at)
+        self.assertEqual(self.reassemble(ole, fragments), data[100:])
+        ole.close()
+
+    def test_empty_ranges(self):
+        'Empty or out-of-stream ranges return no fragments and no defect'
+        ole = olefile.OleFileIO(self.ole_file)
+        size = ole.get_size('worddocument')
+        for offset, length in ((0, 0), (size, 10), (size + 100, None)):
+            fragments, broken_at = ole.get_stream_fragments(
+                'worddocument', offset, length)
+            self.assertEqual(fragments, [])
+            self.assertIsNone(broken_at)
+        ole.close()
+
+    def test_not_a_stream(self):
+        ole = olefile.OleFileIO(self.ole_file)
+        with self.assertRaises(IOError):
+            ole.get_stream_fragments('macros')
+        ole.close()
+
+    def test_stream_not_found(self):
+        ole = olefile.OleFileIO(self.ole_file)
+        with self.assertRaises(IOError):
+            ole.get_stream_fragments('no_such_stream')
+        ole.close()
+
+    def test_negative_offset_or_size(self):
+        ole = olefile.OleFileIO(self.ole_file)
+        with self.assertRaises(ValueError):
+            ole.get_stream_fragments('worddocument', -1, 10)
+        with self.assertRaises(ValueError):
+            ole.get_stream_fragments('worddocument', 0, -1)
+        ole.close()
+
+    def test_broken_fat_chain(self):
+        'A corrupt FAT chain is reported from the first lost logical byte'
+        ole = olefile.OleFileIO(self.ole_file)
+        data = ole.openstream('1Table').read()
+        entry = ole.direntries[ole._find('1Table')]
+        # kill the FAT link after the first sector of the stream:
+        ole.fat[entry.isectStart] = olefile.FREESECT
+        fragments, broken_at = ole.get_stream_fragments('1Table')
+        self.assertEqual(broken_at, ole.sectorsize)
+        self.assertEqual(self.reassemble(ole, fragments),
+                         data[:ole.sectorsize])
+        # a range fully before the defect is still verified:
+        fragments, broken_at = ole.get_stream_fragments('1Table', 100, 200)
+        self.assertIsNone(broken_at)
+        self.assertEqual(self.reassemble(ole, fragments), data[100:300])
+        # a range starting after the defect cannot be verified at all:
+        fragments, broken_at = ole.get_stream_fragments(
+            '1Table', ole.sectorsize + 100, 100)
+        self.assertEqual(broken_at, ole.sectorsize)
+        self.assertEqual(fragments, [])
+        ole.close()
+
+    def test_broken_minifat_chain(self):
+        'A corrupt MiniFAT chain is reported from the first lost mini sector'
+        ole = olefile.OleFileIO(self.ole_file)
+        data = ole.openstream('\x01compobj').read()
+        entry = ole.direntries[ole._find('\x01compobj')]
+        self.assertTrue(entry.is_minifat)
+        ole.loadminifat()
+        # kill the MiniFAT link after the first mini sector of the stream:
+        ole.minifat[entry.isectStart] = olefile.ENDOFCHAIN
+        fragments, broken_at = ole.get_stream_fragments('\x01compobj')
+        self.assertEqual(broken_at, ole.minisectorsize)
+        self.assertEqual(self.reassemble(ole, fragments),
+                         data[:ole.minisectorsize])
+        ole.close()
+
+    def test_broken_root_chain(self):
+        'A corrupt root chain is reported where the mini stream stops'
+        ole = olefile.OleFileIO(self.ole_file)
+        # the mini stream of this file only holds 2 mini sectors, so an
+        # empty root chain breaks the mapping from logical byte 0:
+        ole.root.isectStart = olefile.ENDOFCHAIN
+        fragments, broken_at = ole.get_stream_fragments('\x01compobj')
+        self.assertEqual(broken_at, 0)
+        self.assertEqual(fragments, [])
+        ole.close()
+
+    def test_broken_root_chain_mid_stream(self):
+        'Root chain defect is reported at the first unverifiable mini sector'
+        import array
+        ole = olefile.OleFileIO()
+        ole.sectorsize = 512
+        ole.minisectorsize = 64
+        # root chain: sectors 3 then 7 (1024 bytes of mini stream):
+        ole.fat = array.array('I', [olefile.ENDOFCHAIN] * 16)
+        ole.fat[3] = 7
+        ole.fat[7] = olefile.ENDOFCHAIN
+        # mini stream of 10 mini sectors (640 bytes):
+        ole.minifat = array.array('I', list(range(1, 10))
+                                  + [olefile.ENDOFCHAIN])
+
+        class FakeEntry(object):
+            pass
+        entry = FakeEntry()
+        entry.entry_type = olefile.STGTY_STREAM
+        entry.is_minifat = True
+        entry.isectStart = 0
+        entry.size = 640
+        ole.direntries = {0: entry}
+        ole._find = lambda filename: 0
+        ole.root = FakeEntry()
+        ole.root.isectStart = 3
+
+        fragments, broken_at = ole.get_stream_fragments('fake')
+        self.assertIsNone(broken_at)
+        self.assertEqual(fragments, [(4 * 512, 512), (8 * 512, 128)])
+        # cut the root chain after its first sector: mini stream bytes
+        # from 512 (logical stream offset 512) cannot be verified anymore:
+        ole.fat[3] = olefile.ENDOFCHAIN
+        fragments, broken_at = ole.get_stream_fragments('fake')
+        self.assertEqual(broken_at, 512)
+        self.assertEqual(fragments, [(4 * 512, 512)])
+
+
 class FileHandleCloseTest(unittest.TestCase):
     """Test file handles are closed correctly."""
 
