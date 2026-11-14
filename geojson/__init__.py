@@ -4,6 +4,8 @@ from geojson.geometry import Point, LineString, Polygon
 from geojson.geometry import MultiLineString, MultiPoint, MultiPolygon
 from geojson.geometry import GeometryCollection
 from geojson.feature import Feature, FeatureCollection
+from geojson.rainfall import RainfallBands, RainfallBand, NestingViolation
+from geojson.rainfall import UnavailableInterval, build_bands
 from geojson.base import GeoJSON
 from geojson._version import __version__, __version_info__
 
@@ -14,6 +16,8 @@ __all__ = (
         ["MultiLineString", "MultiPoint", "MultiPolygon"] +
         ["GeometryCollection"] +
         ["Feature", "FeatureCollection"] +
+        ["RainfallBands", "RainfallBand", "NestingViolation"] +
+        ["UnavailableInterval", "build_bands"] +
         ["GeoJSON"] +
         ["__version__", "__version_info__"]
 )

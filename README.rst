@@ -408,6 +408,48 @@ generate_random
   >>> geojson.utils.generate_random("Polygon")  # doctest: +ELLIPSIS
   {"coordinates": [...], "type": "Polygon"}
 
+Rainfall bands
+~~~~~~~~~~~~~~
+
+Cumulative rainfall products describe "at least N mm" surfaces, but data
+warehouses usually need mutually exclusive bands.  ``geojson.build_bands``
+turns cumulative surfaces into disjoint bands in planar coordinates.
+
+.. code:: python
+
+  >>> import geojson
+
+  >>> surfaces = {
+  ...     10: [[(0, 0), (100, 0), (100, 100), (0, 100), (0, 0)]],
+  ...     25: [[(10, 10), (90, 10), (90, 90), (10, 90), (10, 10)]],
+  ... }
+  >>> result = geojson.build_bands(surfaces)
+  >>> [band.label for band in result.bands]
+  ['[10, 25)', '[25, inf)']
+
+Band ``[a, b)`` is ``surface(a) - surface(b)``, so bands never overlap and
+their union is exactly the lowest present cumulative surface.
+
+* If a higher surface locally escapes a lower one, the product is not
+  rejected.  ``result.violations`` reports, for each offending surface,
+  the exact geometry ``surface(upper) - intersection(all lower surfaces)``
+  together with the escaped thresholds; ``result.conflict_geometry`` is the
+  union of every conflict.
+* If a configured threshold has no surface at all, the neighbouring bands
+  are delivered as one joint interval (for example ``[10, 50) joint``) and
+  the threshold is listed in ``result.missing_thresholds``.  A missing
+  layer is never filled with zero rainfall.  An empty geometry, by
+  contrast, means the layer was observed and contains no area.
+* If the lowest configured threshold is missing, no lower surface exists to
+  join with, and the nominal interval is reported in ``result.unavailable``.
+
+``result.to_feature_collection(include_violations=True)`` returns a GeoJSON
+FeatureCollection of the bands plus the conflict union.  The same operation
+is available from the command line:
+
+.. code:: bash
+
+  geojson-rainfall surfaces.geojson --report
 
 Development
 -----------

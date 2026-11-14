@@ -39,6 +39,11 @@ setup(
     package_data={"geojson": ["*.rst"]},
     install_requires=[],
     python_requires=">=3.10",
+    entry_points={
+        "console_scripts": [
+            "geojson-rainfall=geojson.rainfall_cli:main",
+        ],
+    },
     classifiers=[
         "Development Status :: 5 - Production/Stable",
         "Intended Audience :: Developers",
