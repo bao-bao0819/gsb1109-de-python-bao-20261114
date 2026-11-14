@@ -1,0 +1,43 @@
+{
+  "observations": [
+    {"id": "h00-cal", "station": "CAL", "time": "2024-03-01T00:00:00Z", "pressure": 1008.20},
+    {"id": "h00-n1", "station": "N1", "time": "2024-03-01T00:00:00Z", "pressure": 1007.30},
+    {"id": "h00-n2", "station": "N2", "time": "2024-03-01T00:00:00Z", "pressure": 1007.80},
+
+    {"id": "h01-cal", "station": "CAL", "time": "2024-03-01T01:00:00Z", "pressure": 1007.90},
+    {"id": "h01-n1", "station": "N1", "time": "2024-03-01T01:00:00Z", "pressure": 1006.95},
+    {"id": "h01-n2", "station": "N2", "time": "2024-03-01T01:00:00Z", "pressure": 1007.45},
+
+    {"id": "h02-cal", "station": "CAL", "time": "2024-03-02T00:00:00Z", "pressure": 1006.80},
+    {"id": "h02-n1", "station": "N1", "time": "2024-03-02T00:00:00Z", "pressure": 1007.35},
+    {"id": "h02-n2", "station": "N2", "time": "2024-03-02T00:00:00Z", "pressure": 1006.35},
+
+    {"id": "h03-cal", "station": "CAL", "time": "2024-03-02T01:00:00Z", "pressure": 1007.10},
+    {"id": "h03-n1", "station": "N1", "time": "2024-03-02T01:00:00Z", "pressure": 1007.70},
+    {"id": "h03-n2", "station": "N2", "time": "2024-03-02T01:00:00Z", "pressure": 1006.70}
+  ],
+  "devices": [
+    {"station": "CAL", "generation": "cal-1", "start": "2024-01-01T00:00:00Z"},
+    {"station": "N1", "generation": "n1-a", "start": "2024-01-01T00:00:00Z", "end": "2024-03-02T00:00:00Z"},
+    {"station": "N1", "generation": "n1-b", "start": "2024-03-02T00:00:00Z"},
+    {"station": "N2", "generation": "n2-a", "start": "2024-01-01T00:00:00Z"}
+  ],
+  "pairs": [
+    {"id": "h00-cal-n1", "station_a": "CAL", "station_b": "N1", "time": "2024-03-01T00:00:00Z", "low": -0.25, "high": 0.25},
+    {"id": "h00-cal-n2", "station_a": "CAL", "station_b": "N2", "time": "2024-03-01T00:00:00Z", "low": -0.25, "high": 0.25},
+    {"id": "h00-n1-n2", "station_a": "N1", "station_b": "N2", "time": "2024-03-01T00:00:00Z", "low": -0.25, "high": 0.25},
+
+    {"id": "h01-cal-n1", "station_a": "CAL", "station_b": "N1", "time": "2024-03-01T01:00:00Z", "low": -0.25, "high": 0.25},
+    {"id": "h01-cal-n2", "station_a": "CAL", "station_b": "N2", "time": "2024-03-01T01:00:00Z", "low": -0.25, "high": 0.25},
+    {"id": "h01-n1-n2", "station_a": "N1", "station_b": "N2", "time": "2024-03-01T01:00:00Z", "low": -0.25, "high": 0.25},
+
+    {"id": "h02-cal-n1", "station_a": "CAL", "station_b": "N1", "time": "2024-03-02T00:00:00Z", "low": -0.25, "high": 0.25},
+    {"id": "h02-cal-n2", "station_a": "CAL", "station_b": "N2", "time": "2024-03-02T00:00:00Z", "low": -0.25, "high": 0.25},
+    {"id": "h02-n1-n2", "station_a": "N1", "station_b": "N2", "time": "2024-03-02T00:00:00Z", "low": -0.25, "high": 0.25},
+
+    {"id": "h03-cal-n1", "station_a": "CAL", "station_b": "N1", "time": "2024-03-02T01:00:00Z", "low": -0.25, "high": 0.25},
+    {"id": "h03-cal-n2", "station_a": "CAL", "station_b": "N2", "time": "2024-03-02T01:00:00Z", "low": -0.25, "high": 0.25},
+    {"id": "h03-n1-n2", "station_a": "N1", "station_b": "N2", "time": "2024-03-02T01:00:00Z", "low": -0.25, "high": 0.25}
+  ],
+  "calibrated": ["CAL"]
+}

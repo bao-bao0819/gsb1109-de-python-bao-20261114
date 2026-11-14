@@ -1,0 +1,35 @@
+{
+  "_comment": "Corrected pressures are P=Q=R=1001. Reported P=1001, Q=1000.5, R=1000. pq and qr intervals accept +0.5; rp instead insists the loop closes near -0.1, so the three-station walk is inconsistent.",
+  "observations": [
+    {"id": "t0-p", "station": "P", "time": "2024-04-10T00:00:00Z", "pressure": 1001.0},
+    {"id": "t0-q", "station": "Q", "time": "2024-04-10T00:00:00Z", "pressure": 1000.5},
+    {"id": "t0-r", "station": "R", "time": "2024-04-10T00:00:00Z", "pressure": 1000.0},
+
+    {"id": "t1-p", "station": "P", "time": "2024-04-10T01:00:00Z", "pressure": 1001.1},
+    {"id": "t1-q", "station": "Q", "time": "2024-04-10T01:00:00Z", "pressure": 1000.6},
+    {"id": "t1-r", "station": "R", "time": "2024-04-10T01:00:00Z", "pressure": 1000.1},
+
+    {"id": "t2-p", "station": "P", "time": "2024-04-10T02:00:00Z", "pressure": 1000.9},
+    {"id": "t2-q", "station": "Q", "time": "2024-04-10T02:00:00Z", "pressure": 1000.4},
+    {"id": "t2-r", "station": "R", "time": "2024-04-10T02:00:00Z", "pressure": 999.9}
+  ],
+  "devices": [
+    {"station": "P", "generation": "p-1", "start": "2024-01-01T00:00:00Z"},
+    {"station": "Q", "generation": "q-1", "start": "2024-01-01T00:00:00Z"},
+    {"station": "R", "generation": "r-1", "start": "2024-01-01T00:00:00Z"}
+  ],
+  "pairs": [
+    {"id": "pq~0", "station_a": "P", "station_b": "Q", "time": "2024-04-10T00:00:00Z", "low": 0.2, "high": 0.8},
+    {"id": "qr~0", "station_a": "Q", "station_b": "R", "time": "2024-04-10T00:00:00Z", "low": 0.2, "high": 0.8},
+    {"id": "rp~0", "station_a": "R", "station_b": "P", "time": "2024-04-10T00:00:00Z", "low": -0.2, "high": 0.2},
+
+    {"id": "pq~1", "station_a": "P", "station_b": "Q", "time": "2024-04-10T01:00:00Z", "low": 0.2, "high": 0.8},
+    {"id": "qr~1", "station_a": "Q", "station_b": "R", "time": "2024-04-10T01:00:00Z", "low": 0.2, "high": 0.8},
+    {"id": "rp~1", "station_a": "R", "station_b": "P", "time": "2024-04-10T01:00:00Z", "low": -0.2, "high": 0.2},
+
+    {"id": "pq~2", "station_a": "P", "station_b": "Q", "time": "2024-04-10T02:00:00Z", "low": 0.2, "high": 0.8},
+    {"id": "qr~2", "station_a": "Q", "station_b": "R", "time": "2024-04-10T02:00:00Z", "low": 0.2, "high": 0.8},
+    {"id": "rp~2", "station_a": "R", "station_b": "P", "time": "2024-04-10T02:00:00Z", "low": -0.2, "high": 0.2}
+  ],
+  "calibrated": []
+}

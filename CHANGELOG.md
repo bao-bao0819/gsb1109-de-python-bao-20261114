@@ -1,6 +1,14 @@
 Change Log
 ==========
 
+unreleased
+
+- Add `metar.PressureAudit`, which turns simultaneous neighbour pressure
+  intervals into one fixed correction range per station and instrument
+  generation.  It reports absolute ranges only when a calibrated station
+  anchors the connected group, relative differences otherwise, and names the
+  observations on any contradictory three-station cycle.
+
 metar-2.0.2 (26 October 2026)
 
 - Infer a month when METAR day is ambiguous and day of the month does not

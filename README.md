@@ -81,6 +81,25 @@ You can always obtain the most recent version of this package using git, via
 
     git clone https://github.com/python-metar/python-metar.git
 
+Pressure audit
+------------------------------------------------------------------------
+
+`metar/PressureAudit.py` turns simultaneous neighbour pressure-difference
+intervals into one fixed correction range per station and instrument
+generation.  It reads a JSON document with `observations`, `devices` (station,
+generation, start, optional end), `pairs` (two stations, a time or explicit
+observation ids, and low/high bounds for the corrected difference), and
+`calibrated` stations:
+
+    python -m metar.PressureAudit examples/pressure_audit/anchored.json --format text
+
+The correct model is `corrected = reported + correction`, where each
+`correction` belongs to a `(station, generation)` pair, never to an individual
+hour.  A connected group without a calibrated station is reported as relative
+differences only.  When a loop of three stations cannot be reconciled, the
+output lists the exact pair intervals and observation ids that form the
+contradiction.  `--strict` exits 1 when any component is in conflict.
+
 Contents
 ------------------------------------------------------------------------
 
@@ -93,6 +112,7 @@ sample.py | a simple script showing how the decoded data can be accessed. (see m
 sample.metar | a sample METAR report (longer than most).  Try feeding this to the parse_metar.py script...
 metar/Metar.py | the implementation of the Metar class.  This class parses and represents a single METAR report.
 metar/Datatypes.py | a support module that defines classes representing different types of meteorological data, including temperature, pressure, speed, distance, direction and position.
+metar/PressureAudit.py | fits one fixed pressure correction per station and instrument generation from simultaneous neighbour differences, and locates contradictory cycles.
 test/test_*.py | individual test modules
 setup.py  | installation script
 
