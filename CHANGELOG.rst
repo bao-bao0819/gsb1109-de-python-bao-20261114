@@ -1,6 +1,14 @@
 Changes
 =======
 
+Unreleased
+----------
+
+- Add ``classify_rectangle`` and ``point_location`` for relating an
+  axis-aligned rectangle to a Polygon or MultiPolygon with holes. Boundaries
+  are part of the area; the result reports enclosed holes and the rectangle
+  edges responsible for a boundary tangency.
+
 3.3.0
 ----------
 

@@ -229,6 +229,74 @@ Visualize the result of the example above `here <https://gist.github.com/frewsxc
 
 .. _Section 3.3: https://tools.ietf.org/html/rfc7946#section-3.3
 
+Rectangle and area relations
+----------------------------
+
+``geojson.classify_rectangle`` answers whether an axis-aligned rectangle is
+fully inside an area, partly inside it, or disjoint from it.  This is useful
+for positional error envelopes: a mobile station reports a rectangle of
+possible locations, and the service area is a Polygon or MultiPolygon that may
+contain holes.
+
+.. code:: python
+
+  >>> from geojson import MultiPolygon, classify_rectangle
+
+  >>> square = [(0, 0), (10, 0), (10, 10), (0, 10), (0, 0)]
+  >>> hole = [(4, 4), (6, 4), (6, 6), (4, 6), (4, 4)]
+  >>> area = MultiPolygon([(square, hole)])
+
+  >>> classify_rectangle((1, 1, 3, 3), area).value
+  'inside'
+  >>> classify_rectangle((1, 1, 9, 9), area).value
+  'partial'
+  >>> classify_rectangle((20, 20, 30, 30), area).value
+  'outside'
+
+The result is a ``RectangleRelation``.  ``relation`` is ``inside``,
+``partial``, or ``outside``; the same values are available as the ``value``
+property.  ``corner_locations`` reports where each corner lies, and ``reason``
+names the rule that decided the outcome (``rectangle_inside_area``,
+``rectangle_crosses_boundary``, ``enclosed_hole``, ``boundary_tangent``, or
+``disjoint``).
+
+Area boundaries belong to the area, including hole rings; the interior of a
+hole does not.  Consequently a rectangle whose four corners are inside the
+polygon but which encloses a hole is ``partial``, not ``inside``.
+
+.. code:: python
+
+  >>> relation = classify_rectangle((1, 1, 9, 9), area)
+  >>> relation.reason
+  'enclosed_hole'
+  >>> len(relation.enclosed_holes)
+  1
+
+When a rectangle only touches the boundary, ``tangent_only`` is true and
+``tangent_edges`` names the rectangle sides responsible.  The ``edges``
+attribute records every contact, including the area ring segment and the exact
+contact points, so a caller can explain the classification.
+
+.. code:: python
+
+  >>> relation = classify_rectangle((10, 2, 20, 8), area)
+  >>> relation.value
+  'partial'
+  >>> relation.tangent_only
+  True
+  >>> relation.tangent_edges
+  ('left',)
+  >>> relation.edge_map['left'].contacts[0].segment
+  ((10.0, 0.0), (10.0, 10.0))
+
+The rectangle may be given as ``(min_x, min_y, max_x, max_y)`` bounds, a
+``Rectangle``, a GeoJSON Polygon with four axis-aligned corners, or a Feature
+wrapping one.  ``Polygon`` and ``MultiPolygon`` also expose
+``relation_to_rectangle`` and ``classify_rectangle`` methods.
+
+``geojson.point_location`` returns ``PointLocation.INSIDE``, ``BOUNDARY``, or
+``OUTSIDE`` for a single position and applies the same hole rules.
+
 GeoJSON encoding/decoding
 -------------------------
 

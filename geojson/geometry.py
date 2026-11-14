@@ -138,10 +138,32 @@ class Polygon(Geometry):
     def errors(self):
         return check_polygon(self['coordinates'])
 
+    def relation_to_rectangle(self, rectangle):
+        """Classify an axis-aligned error rectangle against this polygon.
+
+        See :func:`geojson.relations.classify_rectangle` for the accepted
+        rectangle forms and the meaning of the result.
+        """
+        from geojson.relations import classify_rectangle
+        return classify_rectangle(rectangle, self)
+
+    classify_rectangle = relation_to_rectangle
+
 
 class MultiPolygon(Geometry):
     def errors(self):
         return self.check_list_errors(check_polygon, self['coordinates'])
+
+    def relation_to_rectangle(self, rectangle):
+        """Classify an axis-aligned error rectangle against this multipolygon.
+
+        See :func:`geojson.relations.classify_rectangle` for the accepted
+        rectangle forms and the meaning of the result.
+        """
+        from geojson.relations import classify_rectangle
+        return classify_rectangle(rectangle, self)
+
+    classify_rectangle = relation_to_rectangle
 
 
 class Default:
