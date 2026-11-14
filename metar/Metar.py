@@ -1355,6 +1355,110 @@ class Metar(object):
                 text_list.append(" ".join(text_parts))
         return "; ".join(text_list)
 
+    # sky-cover codes that count toward a ceiling: the lowest broken (BKN),
+    # overcast (OVC) or vertical-visibility (VV) layer. FEW and SCT do not
+    # constitute a ceiling.
+    CEILING_COVERS = ("BKN", "OVC", "VV")
+
+    def ceiling_conditions(self):
+        """
+        Return the sky layers that can determine the low-cloud ceiling.
+
+        Only BKN, OVC and vertical-visibility (VV) layers qualify; scattered
+        or fewer clouds are not a ceiling. The layers are returned in report
+        order (lowest first) as ``(cover, height)`` pairs, with the height as
+        a ``distance`` object or ``None`` when the report gives the amount of
+        cloud but omits its height (for example ``BKN///`` or ``VV///``).
+
+        The height-unknown layers are deliberately retained instead of being
+        dropped or assigned another layer's height, so a caller can still tell
+        that a ceiling exists while treating its base as uncertain.
+        """
+        return [
+            (cover, height)
+            for cover, height, cloud in self.sky
+            if cover in self.CEILING_COVERS
+        ]
+
+    def low_cloud_bins(self, bin_edges, units="FT"):
+        """
+        Tally this report's low-cloud ceiling against caller-supplied bins.
+
+        The ceiling is the lowest BKN, OVC or vertical-visibility layer. The
+        tally keeps reports whose ceiling height is known apart from those
+        whose ceiling height is missing, so missing historical data is never
+        mistaken for a precise cloud base.
+
+        Parameters
+        ----------
+        bin_edges : sequence of float
+          Strictly increasing bin upper bounds, expressed in ``units``. A
+          ceiling falls in the bin of the first edge whose value is greater
+          than or equal to its height; the first bin starts at zero. Bins are
+          reported in the order given.
+        units : str
+          Height unit of ``bin_edges`` (any unit supported by ``distance``,
+          for example ``"FT"`` or ``"M"``).
+
+        Returns
+        -------
+        dict
+          ``"bins"`` maps each edge to the reports whose ceiling is known to
+          fall in that bin, ``"possible"`` maps each edge to the reports whose
+          ceiling may fall in that bin but cannot be pinned down, and
+          ``"no_ceiling"`` counts reports with no BKN, OVC or VV layer. A
+          report contributes to at most one definite bin and at most once to
+          each possible bin, so the multiple layers of one report never count
+          twice.
+
+        A layer whose amount is reported but whose height is missing is a
+        ceiling of unknown height. The height of a higher known layer is never
+        substituted for its base; it only bounds the unknown base from above.
+        Such a report is added to every bin the missing ceiling could occupy,
+        namely the bins at or below the first known layer above it, or every
+        bin when no higher layer is known. A ceiling above the highest edge is
+        not counted in any bin.
+        """
+        edges = list(bin_edges)
+        if edges != sorted(edges) or len(edges) != len(set(edges)):
+            raise ValueError("bin_edges must be strictly increasing")
+
+        definite = {edge: 0 for edge in edges}
+        possible = {edge: 0 for edge in edges}
+
+        layers = self.ceiling_conditions()
+        if not layers:
+            return {
+                "bins": definite,
+                "possible": possible,
+                "no_ceiling": 1,
+            }
+
+        # Layers are reported lowest-first, so the first one is the ceiling.
+        _, first_height = layers[0]
+        if first_height is not None:
+            ceiling = first_height.value(units)
+            for edge in edges:
+                if edge >= ceiling:
+                    definite[edge] += 1
+                    break
+        else:
+            # The ceiling amount is known but its base is not. The first known
+            # layer above it only supplies an upper bound on that base.
+            upper = None
+            for _, height in layers[1:]:
+                if height is not None:
+                    upper = height.value(units)
+                    break
+            previous_edge = 0
+            for edge in edges:
+                if upper is not None and previous_edge >= upper:
+                    break
+                possible[edge] += 1
+                previous_edge = edge
+
+        return {"bins": definite, "possible": possible, "no_ceiling": 0}
+
     def sky_conditions(self, sep="; "):
         """
         Return a textual description of the sky conditions.

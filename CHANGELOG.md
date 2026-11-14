@@ -1,6 +1,16 @@
 Change Log
 ==========
 
+Unreleased
+
+- Add `Metar.ceiling_conditions()` to retain the BKN, OVC and
+  vertical-visibility layers that determine the low-cloud ceiling, including
+  layers whose height is missing rather than substituting a higher layer's
+  height.
+- Add `Metar.low_cloud_bins()` to tally a report's ceiling into caller-specified
+  height bins, keeping definite placements separate from reports whose ceiling
+  height is missing and so may still fall into several bins.
+
 metar-2.0.2 (26 October 2026)
 
 - Infer a month when METAR day is ambiguous and day of the month does not
