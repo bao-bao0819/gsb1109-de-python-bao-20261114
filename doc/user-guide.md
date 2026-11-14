@@ -163,6 +163,40 @@ parts of **pyelftools** which define \"structs\". For ELF this is in
 `elftools/dwarf/structs.py`. A word of warning: these are parts of the
 low-level API, use them at your own peril.
 
+### Firmware provider selection
+
+Some deployment pipelines collect libraries offline and must fold them into a
+single archive shared by several firmware versions. The `elftools.elf.firmware`
+module reads the dynamic dependencies of ELF files and solves which library
+versions to keep.
+
+`read_dynamic_dependencies` reports the `DT_SONAME`, the ordered `DT_NEEDED`
+names and the file size of an ELF object. It reads the dynamic section when
+one exists and falls back to the `PT_DYNAMIC` segment for fully stripped
+files, so it also works on binaries without section headers.
+
+A `Provider` is one concrete library file: a SONAME, a version, an archive
+size and the requirement names it can satisfy. Two providers with the same
+`(soname, version)` are the same file. A `Module` is an offline acquisition
+module whose requirements come from its ELF dependencies, and a
+`FirmwareTarget` is a firmware version naming the modules it enables.
+
+`select_providers` chooses one provider per requirement for every target.
+Within a target at most one version of a SONAME may be used; different
+targets may pick different versions. The objective is the total archive size,
+and a file shared by several targets is counted once. When a target cannot be
+assembled, the result carries a `Conflict` whose requirements form a
+subset-minimal mutually exclusive group: the group is unsatisfiable but
+dropping any single member makes it satisfiable.
+
+`load_catalog` and `load_config` read the provider catalog and firmware
+configuration from JSON, optionally deriving sizes and SONAMEs from ELF files.
+The `scripts/firmware_providers.py` script wraps this workflow:
+
+``` text
+> python scripts/firmware_providers.py --catalog catalog.json --config config.json
+```
+
 ### DWARF information
 
 The main entry point for DWARF information in **pyelftools** is the
