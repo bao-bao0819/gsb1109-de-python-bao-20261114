@@ -398,6 +398,9 @@ class Metar(object):
         self.wind_speed_peak = None  # peak wind speed in last hour
         self.wind_dir_peak = None  # direction of peak wind speed in last hour
         self.peak_wind_time = None  # time of peak wind observation [datetime]
+        # Whether the PK WND remark gave an explicit hour. When it only gives
+        # minutes, the hour is unreported and peak_wind_time is just one guess.
+        self.peak_wind_hour_reported = None
         self.wind_shift_time = None  # time of wind shift [datetime]
         self.max_temp_6hr = None  # max temp in last 6 hours
         self.min_temp_6hr = None  # min temp in last 6 hours
@@ -947,12 +950,20 @@ class Metar(object):
     def _handlePeakWindRemark(self, d):
         """
         Parse a peak wind remark group.
+
+        The remark may report the occurrence with a full ``HHMM`` time or with
+        minutes only (``MM``). ``peak_wind_hour_reported`` records which form
+        was used. With minutes only, ``peak_wind_time`` is a single best guess
+        (the current report's hour, walked back if that is in the future); the
+        metar.peakwind module keeps every hour that is consistent with the
+        station clock and the look-back window instead of committing to it.
         """
         peak_dir = int(d["dir"])
         peak_speed = int(d["speed"])
         self.wind_speed_peak = speed(peak_speed, "KT")
         self.wind_dir_peak = direction(peak_dir)
         peak_min = int(d["min"])
+        self.peak_wind_hour_reported = bool(d["hour"])
         if d["hour"]:
             peak_hour = int(d["hour"])
         else:

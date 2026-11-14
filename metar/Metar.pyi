@@ -47,6 +47,7 @@ class Metar:
     wind_speed_peak: Optional[speed]
     wind_dir_peak: Optional[direction]
     peak_wind_time: Optional[datetime]
+    peak_wind_hour_reported: Optional[bool]
     wind_shift_time: Optional[datetime]
     max_temp_6hr: Optional[temperature]
     min_temp_6hr: Optional[temperature]

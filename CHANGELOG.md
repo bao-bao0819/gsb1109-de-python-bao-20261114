@@ -1,6 +1,19 @@
 Change Log
 ==========
 
+Unreleased
+
+- Add `metar.peakwind`, which builds a chronological table of peak-wind
+  events from consecutive METARs. Minute-only `PK WND` remarks keep every
+  occurrence time consistent with the station clock, the previous available
+  observation and a configurable maximum look-back, instead of guessing one
+  hour. Repeated mentions of the same gust are linked (their possible times
+  are intersected), equal-speed gusts in disjoint hours stay separate, and
+  `backfill()` reports which attributions become unique after a late report
+  is inserted.
+- Record whether a peak-wind remark carried an explicit hour in
+  `Metar.peak_wind_hour_reported`.
+
 metar-2.0.2 (26 October 2026)
 
 - Infer a month when METAR day is ambiguous and day of the month does not

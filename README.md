@@ -141,6 +141,35 @@ METAR: METAR KEWR 111851Z VRB03G19KT 2SM R04R/3000VP6000FT TSRA BR FEW015 BKN040
 >>>>
 ```
 
+Peak-wind event tables
+----------------------
+
+A single report only exposes the peak wind of its own hour. To turn a
+sequence of reports into a chronological list of gust events, use
+`metar.peakwind`:
+
+```python
+from datetime import timedelta
+from metar import Metar, peakwind
+
+reports = [
+    Metar.Metar("METAR KEWR 110050Z AUTO ... RMK AO2 PK WND 31028/50", month=1, year=2026),
+    Metar.Metar("METAR KEWR 110150Z AUTO ... RMK AO2 PK WND 31028/50", month=1, year=2026),
+]
+for event in peakwind.peak_wind_events(reports, max_lookback=timedelta(hours=2)):
+    print(event.time, event.direction, event.speed, event.is_resolved, event.occurrences)
+```
+
+A `PK WND` remark that gives minutes only (`31028/50`) does not state its
+hour, so the module keeps every occurrence consistent with the station clock,
+the previous available observation and the maximum look-back, rather than
+guessing one. The same gust repeated by a later report is linked into a single
+event and the shared possible times are intersected, which often resolves the
+hour uniquely; two gusts with an identical speed but no shared possible time
+remain separate events. `peak_wind_table()` returns plain rows, and
+`backfill()` re-runs the build after inserting a late, older report and
+reports which events became uniquely attributable.
+
 Tests
 ------------------------------------------------------------------------
 
