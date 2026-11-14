@@ -3,6 +3,14 @@ Detailed CHANGELOG
 
 olefile.py
 ----------
+* 2026-11-14 v0.48:
+    - added extract_attachments/extract_ole_attachments: recursive extraction
+      of streams and embedded OLE attachments, with a total byte budget and a
+      maximum nesting depth
+    - duplicate stream references are read once but reported for every path;
+      streams deferred by the budget or depth limit are listed separately
+    - OleStream.bytes_read records bytes actually available before truncation,
+      so corrupt streams only consume their real size from a budget
 * 2023-11-30 v0.47.dev6:
     - fixed issue #142: isOleFile has a new data parameter to handle files in memory properly
     - fixed issue #156: write_sect now correctly detects when data is larger than the sector size

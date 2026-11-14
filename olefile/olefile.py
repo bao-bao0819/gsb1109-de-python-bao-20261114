@@ -98,10 +98,13 @@ __all__ = ['isOleFile', 'OleFileIO', 'OleMetadata', 'enable_logging',
            'DEFECT_FATAL', 'DEFAULT_PATH_ENCODING',
            'MAXREGSECT', 'DIFSECT', 'FATSECT', 'ENDOFCHAIN', 'FREESECT',
            'MAXREGSID', 'NOSTREAM', 'UNKNOWN_SIZE', 'WORD_CLSID',
-           'OleFileIONotClosed'
+           'OleFileIONotClosed', 'OleExtractionResult',
+           'OleExtractedStream', 'OlePendingStream',
+           'extract_attachments', 'extract_ole_attachments'
 ]
 
 import io
+import hashlib
 import sys
 import struct, array, os.path, datetime, logging, warnings, traceback
 
@@ -617,6 +620,10 @@ class OleStream(io.BytesIO):
         log.debug('  sect=%d (%X), size=%d, offset=%d, sectorsize=%d, len(fat)=%d, fp=%s'
             %(sect,sect,size,offset,sectorsize,len(fat), repr(fp)))
         self.ole = olefileio
+        # Number of logical stream bytes actually read from the container
+        # before any truncation. For a truncated/corrupt stream this is
+        # smaller than the size declared by the directory entry.
+        self.bytes_read = 0
         # this check is necessary, otherwise when attempting to open a stream
         # from a closed OleFileIO, a stream of size zero is returned without
         # raising an exception. (see issue #81)
@@ -705,6 +712,12 @@ class OleStream(io.BytesIO):
         # if sect != ENDOFCHAIN:
         #     raise IOError('incorrect last sector index in OLE stream')
         data = b"".join(data)
+        # Keep the number of bytes that were really available in the
+        # container, before truncating to the declared stream size. Callers
+        # accounting for a byte budget must use this value, not the declared
+        # size: a corrupt stream must not consume quota for bytes that were
+        # never read.
+        self.bytes_read = len(data)
         # Data is truncated to the actual stream size:
         if len(data) >= size:
             log.debug('Read data of length %d, truncated to stream size %d' % (len(data), size))
@@ -2538,6 +2551,421 @@ class OleFileIO:
             return data
 
         return data
+
+    def extract_attachments(self, max_unpacked_bytes=None, max_depth=None,
+                            raise_defects=None):
+        """
+        Extract streams recursively from this container.
+
+        This is a convenience wrapper around :func:`extract_attachments`.
+        The container is not closed by this method.
+
+        :param max_unpacked_bytes: maximum total bytes to read, or None.
+        :param max_depth: maximum nesting depth, or None for no limit.
+        :param raise_defects: defect level for embedded containers. Defaults
+            to the level of this OleFileIO instance.
+        :returns: an :class:`OleExtractionResult`.
+        """
+        if raise_defects is None:
+            raise_defects = self._raise_defects_level
+        return extract_attachments(
+            self, max_unpacked_bytes=max_unpacked_bytes,
+            max_depth=max_depth, raise_defects=raise_defects)
+
+    extract_ole_attachments = extract_attachments
+
+
+# --- OLE attachment extraction -----------------------------------------------
+
+class OleExtractedStream(object):
+    """
+    A stream extracted from an OLE container.
+
+    ``path`` is the absolute path of the stream inside the top-level
+    container: the path of the attachment that contained it, followed by the
+    path inside that attachment, and so on. ``origin`` is the path of the
+    attachment itself (``None`` for streams of the top-level container).
+    ``depth`` is 0 for top-level streams and increases by one for each
+    embedded OLE file.
+
+    Two different paths may point at the same physical stream in a malformed
+    or deliberately deduplicated container. Each path is reported separately,
+    while ``data`` may be shared to avoid reading the stream twice.
+    """
+
+    def __init__(self, path, data, size, origin=None, depth=0, sha256=None,
+                 sources=None, identity=None):
+        self.path = list(path)
+        self.data = data
+        self.size = size
+        self.origin = None if origin is None else list(origin)
+        self.depth = depth
+        self.sha256 = sha256
+        # Internal physical identity used to merge duplicate references to
+        # the same stream without merging merely byte-identical attachments.
+        self.identity = identity
+        # Every absolute path that references this same attachment. For a
+        # unique stream this contains just ``path``; when the same stream is
+        # referenced twice, both paths are kept while the data is read once.
+        self.sources = [list(path)] if sources is None else [
+            list(source) for source in sources]
+
+    @property
+    def name(self):
+        """Last component of the absolute stream path."""
+        return self.path[-1] if self.path else None
+
+    @property
+    def references(self):
+        """Alias for ``sources``."""
+        return self.sources
+
+    def __repr__(self):
+        return 'OleExtractedStream(path=%r, size=%r, origin=%r, depth=%r)' % (
+            self.path, self.size, self.origin, self.depth)
+
+
+class OlePendingStream(object):
+    """
+    A stream that was discovered but not extracted because a limit was hit.
+
+    ``path`` is the absolute path (see :class:`OleExtractedStream`).
+    ``reason`` is ``'budget'`` when reading it would exceed the total unpack
+    budget, or ``'depth'`` when it lies in an embedded OLE file beyond the
+    depth limit. ``size`` is the size declared in its directory entry.
+    Pending streams are never partially read.
+    """
+
+    def __init__(self, path, size, reason, origin=None, depth=0):
+        self.path = list(path)
+        self.size = size
+        self.reason = reason
+        self.origin = None if origin is None else list(origin)
+        self.depth = depth
+
+    @property
+    def name(self):
+        """Last component of the absolute stream path."""
+        return self.path[-1] if self.path else None
+
+    def __repr__(self):
+        return 'OlePendingStream(path=%r, size=%r, reason=%r, origin=%r)' % (
+            self.path, self.size, self.reason, self.origin)
+
+
+class OleExtractionResult(object):
+    """
+    Result of :func:`extract_attachments`.
+
+    ``streams`` contains :class:`OleExtractedStream` objects in stable
+    absolute-path order. ``pending`` contains :class:`OlePendingStream`
+    objects for streams deferred by the byte budget or depth limit, also in
+    stable absolute-path order. ``unpacked_bytes`` is the number of bytes
+    actually read from streams. ``errors`` lists errors raised by malformed
+    embedded OLE files; those files are still reported as extracted
+    attachments but their inner streams cannot be traversed.
+    """
+
+    def __init__(self, streams, pending, unpacked_bytes, budget,
+                 max_depth, errors=None):
+        self.streams = streams
+        self.pending = pending
+        self.unpacked_bytes = unpacked_bytes
+        self.budget = budget
+        self.max_depth = max_depth
+        self.errors = [] if errors is None else errors
+
+    # Common aliases used by callers of the extraction entry point.
+    @property
+    def extracted(self):
+        """Alias for ``streams``."""
+        return self.streams
+
+    @property
+    def expanded(self):
+        """Alias for ``streams``."""
+        return self.streams
+
+    @property
+    def deferred(self):
+        """Alias for ``pending``."""
+        return self.pending
+
+    @property
+    def todo(self):
+        """Alias for ``pending``."""
+        return self.pending
+
+    @property
+    def total_unpacked_bytes(self):
+        """Alias for ``unpacked_bytes``."""
+        return self.unpacked_bytes
+
+    @property
+    def unique_streams(self):
+        """One extracted stream per distinct attachment, in stable path order.
+
+        Streams that are byte-identical share one entry whose ``sources``
+        lists every absolute path referencing them.
+        """
+        unique = []
+        by_identity = {}
+        for item in self.streams:
+            key = item.identity
+            if key is None:
+                key = (item.size, item.sha256)
+            existing = by_identity.get(key)
+            if existing is None:
+                existing = item
+                by_identity[key] = existing
+                unique.append(existing)
+            for source in item.sources:
+                if source not in existing.sources:
+                    existing.sources.append(source)
+        return unique
+
+    attachments = unique_streams
+
+    @property
+    def streams_by_path(self):
+        """Mapping of absolute path tuple to extracted stream."""
+        return dict((tuple(item.path), item) for item in self.streams)
+
+    @property
+    def pending_by_path(self):
+        """Mapping of absolute path tuple to pending stream."""
+        return dict((tuple(item.path), item) for item in self.pending)
+
+    @property
+    def budget_exhausted(self):
+        """True if at least one stream was deferred for lack of budget."""
+        return any(item.reason == 'budget' for item in self.pending)
+
+    def __repr__(self):
+        return ('OleExtractionResult(streams=%d, pending=%d, '
+                'unpacked_bytes=%r, budget=%r, max_depth=%r)' % (
+                    len(self.streams), len(self.pending), self.unpacked_bytes,
+                    self.budget, self.max_depth))
+
+
+def _ole_stream_identity(entry):
+    """Return a stable identity for the physical stream behind a directory entry."""
+    return (entry.is_minifat, entry.isectStart, entry.size)
+
+
+def _ole_path_key(path):
+    """Stable sort key for absolute paths.
+
+    Components are compared case-insensitively first, then case-sensitively
+    to break ties deterministically. This mirrors the case-insensitive lookup
+    of OLE names without letting platform or locale collation affect output.
+    """
+    key = []
+    for item in path:
+        text = item if isinstance(item, str) else repr(item)
+        key.append((text.lower(), text))
+    return tuple(key)
+
+
+def _is_nested_ole(data):
+    """Return True when data starts with OLE magic and is large enough."""
+    return len(data) >= MINIMAL_OLEFILE_SIZE and data[:len(MAGIC)] == MAGIC
+
+
+def extract_attachments(ole_file, max_unpacked_bytes=None, max_depth=None,
+                        raise_defects=DEFECT_FATAL):
+    """
+    Recursively extract streams from an OLE container, including OLE files
+    embedded in its streams.
+
+    Traversal is depth-first and deterministic: each storage's entries are
+    visited in absolute path order, and the streams of an embedded OLE file
+    are visited before its next sibling. The byte budget is charged for the
+    bytes actually read from a stream, not for the size declared in the
+    directory entry, so a corrupted or truncated stream consumes only what
+    was really available.
+
+    A stream referenced from several paths is read once and its data is
+    shared, but every path is reported separately. Identical embedded OLE
+    files referenced from several places are also opened and traversed only
+    once; their inner streams are still listed under every origin.
+
+    ``max_depth`` limits nesting: 0 extracts only the top-level container,
+    1 also extracts streams inside embedded OLE files, and so on. ``None``
+    means no limit. When the limit is reached, the embedded OLE stream is
+    still extracted and its direct children are listed in ``pending`` with
+    reason ``'depth'``.
+
+    ``max_unpacked_bytes`` is a hard total budget: a stream is extracted only
+    if the bytes actually read fit in the remaining budget. A stream that
+    exactly ends at the budget is extracted, and the next stream is reported
+    as pending with reason ``'budget'``. Deferred streams are not counted in
+    ``unpacked_bytes``.
+
+    :param ole_file: path, file-like object, bytes, or an OleFileIO instance.
+        A caller-provided OleFileIO instance is not closed.
+    :param max_unpacked_bytes: maximum total bytes to read from streams, or
+        None for no limit.
+    :param max_depth: maximum nesting depth of embedded OLE files, or None
+        for no limit.
+    :param raise_defects: defect level used when parsing the containers. The
+        default tolerates malformed or duplicate stream references so that
+        partial data can still be extracted and accounted for.
+    :returns: an :class:`OleExtractionResult`.
+    """
+    if max_depth is not None and max_depth < 0:
+        raise ValueError('max_depth must be >= 0 or None')
+    if max_unpacked_bytes is not None and max_unpacked_bytes < 0:
+        raise ValueError('max_unpacked_bytes must be >= 0 or None')
+
+    own_ole = not isinstance(ole_file, OleFileIO)
+    if own_ole:
+        ole = OleFileIO(ole_file, raise_defects=raise_defects)
+    else:
+        ole = ole_file
+
+    streams = []
+    pending = []
+    errors = []
+    unpacked = [0]
+    # Physical streams already read. Keys are (container key, entry identity);
+    # the container key distinguishes equal sector numbers in different
+    # embedded files, while a shared embedded file reuses the same key.
+    cache = {}
+    # Embedded containers parsed from identical bytes are shared, so their
+    # directory and streams are read only once even when referenced twice.
+    nested_cache = {}
+    opened = {}
+
+    def container_key(container, digest=None):
+        if digest is not None:
+            return ('nested', digest)
+        return ('root', id(container))
+
+    def open_nested(data, digest):
+        """Open an embedded OLE file once, keyed by content digest."""
+        key = ('nested', digest)
+        nested = nested_cache.get(key)
+        if nested is not None:
+            return nested
+        nested = OleFileIO(data, raise_defects=raise_defects)
+        nested_cache[key] = nested
+        opened[key] = nested
+        return nested
+
+    def list_entries(container, origin):
+        """Return (path inside container, absolute path, entry) in stable order."""
+        entries = []
+        for path in container.listdir():
+            entry = container.direntries[container._find(path)]
+            absolute = ([] if origin is None else list(origin)) + list(path)
+            entries.append((list(path), absolute, entry))
+        entries.sort(key=lambda item: _ole_path_key(item[1]))
+        return entries
+
+    def read_stream(c_key, container, path, entry):
+        """Read one physical stream, or report it as budget-pending.
+
+        Returns (data, digest, pending_size). Exactly one of data and
+        pending_size is non-None.
+        """
+        cache_key = (c_key, _ole_stream_identity(entry))
+        if cache_key in cache:
+            cached = cache[cache_key]
+            if cached[0] == 'pending':
+                return None, None, cached[1]
+            return cached[1], cached[2], None
+        stream = container.openstream(path)
+        try:
+            data = stream.read()
+        finally:
+            stream.close()
+        # For a truncated stream, openstream returns (and records as a
+        # parsing issue) only the bytes really available. Never use the
+        # declared directory size for accounting: a corrupt stream must not
+        # consume budget for bytes that were never read.
+        read = len(data)
+        if read < entry.size:
+            errors.append(OleFileError(
+                'truncated stream %r: read %d of %d bytes' % (
+                    list(path), read, entry.size)))
+        if max_unpacked_bytes is not None and \
+                unpacked[0] + read > max_unpacked_bytes:
+            # Do not partially charge or partially deliver the stream. It is
+            # deferred whole, and only bytes from extracted streams count.
+            # Remember the decision: the budget can only shrink, so another
+            # reference to the same physical stream must not re-read it.
+            cache[cache_key] = ('pending', entry.size)
+            return None, None, entry.size
+        unpacked[0] += read
+        digest = hashlib.sha256(data).hexdigest()
+        cache[cache_key] = ('data', data, digest)
+        return data, digest, None
+
+    def enqueue(container, c_key, origin, depth, work, depth_blocked=False):
+        """Append a container's streams to the LIFO work list in path order.
+
+        When depth_blocked is True, streams are not read: they are added
+        directly to pending with reason 'depth'.
+        """
+        entries = list_entries(container, origin)
+        if depth_blocked:
+            for path, absolute, entry in entries:
+                pending.append(OlePendingStream(
+                    path=absolute, size=entry.size, reason='depth',
+                    origin=origin, depth=depth))
+            return
+        for path, absolute, entry in reversed(entries):
+            work.append((container, c_key, path, absolute, entry, origin,
+                         depth))
+
+    try:
+        work = []
+        root_key = container_key(ole)
+        enqueue(ole, root_key, None, 0, work)
+        while work:
+            container, c_key, path, absolute, entry, origin, depth = work.pop()
+            data, digest, pending_size = read_stream(
+                c_key, container, path, entry)
+            if data is None:
+                pending.append(OlePendingStream(
+                    path=absolute, size=pending_size, reason='budget',
+                    origin=origin, depth=depth))
+                continue
+            streams.append(OleExtractedStream(
+                path=absolute, data=data, size=len(data), origin=origin,
+                depth=depth, sha256=digest,
+                identity=(c_key, _ole_stream_identity(entry))))
+            if not _is_nested_ole(data):
+                continue
+            try:
+                nested = open_nested(data, digest)
+            except Exception as exc:
+                # The embedded file itself remains an extracted attachment;
+                # its damaged contents simply cannot be traversed.
+                errors.append(exc)
+                continue
+            nested_key = container_key(nested, digest)
+            enqueue(nested, nested_key, list(absolute), depth + 1, work,
+                    depth_blocked=(max_depth is not None and
+                                   depth >= max_depth))
+    finally:
+        for nested in opened.values():
+            nested.close()
+        if own_ole:
+            ole.close()
+
+    streams.sort(key=lambda item: _ole_path_key(item.path))
+    pending.sort(key=lambda item: _ole_path_key(item.path))
+    return OleExtractionResult(streams, pending, unpacked[0],
+                               max_unpacked_bytes, max_depth, errors)
+
+
+def extract_ole_attachments(ole_file, max_unpacked_bytes=None, max_depth=None,
+                            raise_defects=DEFECT_FATAL):
+    """Alias for :func:`extract_attachments`."""
+    return extract_attachments(ole_file, max_unpacked_bytes=max_unpacked_bytes,
+                               max_depth=max_depth, raise_defects=raise_defects)
 
 
 # --------------------------------------------------------------------

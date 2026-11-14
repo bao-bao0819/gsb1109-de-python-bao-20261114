@@ -412,6 +412,43 @@ containing user-defined properties.
             print('\t{} {}: {}'.format(index, variable['property_name'],variable['value']))
 
 
+Extract nested OLE attachments with a limit
+-------------------------------------------
+
+:py:func:`olefile.extract_attachments` walks all streams of an OLE
+container and, optionally, the streams of OLE files embedded in them.
+The result separates extracted streams from streams deferred to a later
+batch. Both lists are in stable path order (new in v0.48):
+
+::
+
+    result = olefile.extract_attachments(
+        'mail.msg', max_unpacked_bytes=10 * 1024 * 1024, max_depth=2)
+
+    for stream in result.streams:
+        print('/'.join(stream.path), stream.size, stream.depth)
+
+    for stream in result.pending:
+        print('deferred:', '/'.join(stream.path), stream.reason)
+
+``max_depth`` controls nesting: 0 reads only the top-level container, 1
+also reads the streams of embedded OLE files, and so on. ``None`` removes
+the limit. When the limit is reached, the embedded OLE stream itself is
+still extracted, and its direct children are listed in ``pending`` with
+``reason == 'depth'``.
+
+``max_unpacked_bytes`` is a total budget over the bytes actually read
+from streams. A stream is either extracted whole or deferred with
+``reason == 'budget'``; it is never partially charged. Consequently a
+stream that ends exactly at the budget is extracted, and the next stream
+is deferred. Corrupt streams only consume the bytes really available, not
+the size declared in the directory.
+
+A stream referenced from several paths is read once and its data is shared,
+while every path is reported. ``result.unique_streams`` groups these
+references and lists all paths in ``sources``. Identical embedded OLE files
+referenced from several places are traversed only once as well.
+
 Close the OLE file
 ------------------
 

@@ -17,6 +17,7 @@ Summary
     olefile.OleFileIO
     olefile.OleMetadata
     olefile.enable_logging
+    olefile.extract_attachments
 
 
 olefile module
