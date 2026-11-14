@@ -68,6 +68,12 @@ Misc methods
 .. autoclass:: pysubs2.SSAStyle
    :members:
 
+``pysubs2.alignment`` --- aligning two subtitle tracks
+------------------------------------------------------
+
+.. automodule:: pysubs2.alignment
+   :members:
+
 ``pysubs2.time`` --- time-related utilities
 -------------------------------------------
 

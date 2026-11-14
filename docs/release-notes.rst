@@ -1,6 +1,14 @@
 Release Notes
 =============
 
+**Unreleased**
+
+- Added :func:`pysubs2.align_events` for time-overlap based alignment of two subtitle
+  tracks. It pairs contiguous groups of cues from each track (allowing merges, splits
+  and omissions, but never reordering or reusing lines), maximizes total temporal
+  overlap (then minimizes unpaired cues), and reports only the groups shared by every
+  optimal pairing; the remaining groups are flagged for human review.
+
 **1.9.1** --- released on 2026-10-30
 
 - SRT parser is more conservative about removing subtitle indices (Issue #119)

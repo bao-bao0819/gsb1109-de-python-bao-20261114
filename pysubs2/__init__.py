@@ -1,4 +1,5 @@
 from . import cli, exceptions, formats, time
+from .alignment import AlignmentResult, LinePair, align_events
 from .common import VERSION, Alignment, Color
 from .exceptions import *
 from .formats import whisper
@@ -9,10 +10,13 @@ from .ssastyle import SSAStyle
 __all__ = [
     "VERSION",
     "Alignment",
+    "AlignmentResult",
     "Color",
+    "LinePair",
     "SSAEvent",
     "SSAFile",
     "SSAStyle",
+    "align_events",
     "cli",
     "exceptions",
     "formats",
