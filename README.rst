@@ -55,6 +55,34 @@ You can set the required precision with the optional ``precision`` parameter. Th
 
 You can decode into (lon, lat) tuples by setting ``geojson=True``.
 
+Make-up trajectory suffixes
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Vehicles that reconnect after a gap can upload only the missing tail of a
+trip as a differential suffix relative to an already archived point::
+
+    from polyline import MakeupPackage, TripArchive, encode_suffix, prefix_identity
+
+    archive = TripArchive('trip-42')
+    archive.load_base([(0.0, 0.0), (1.0, 1.0)])
+
+    package = MakeupPackage(
+        trip_id='trip-42',
+        prefix_id=prefix_identity('trip-42', [(0.0, 0.0), (1.0, 1.0)]),
+        start_seq=1,
+        suffix=encode_suffix((1.0, 1.0), [(2.0, 2.0)]),
+    )
+    archive.receive(package)
+
+Each package declares the identity of the prefix it continues, the sequence
+number of its anchor point and the encoding precision; the suffix is appended
+only when all three match the archive. Two revisions that happen to end at
+the same coordinate have different prefix identities and are never
+concatenated. Packages arriving before their prerequisite are staged and take
+effect once it shows up, replays of an identical package only add a receipt
+record, and conflicting suffixes for the same prerequisite are kept as
+branches for manual review.
+
 
 Development
 -----------
