@@ -188,6 +188,41 @@ class OfxPreprocessedFile(OfxFile):
         self.fh = new_fh
 
 
+class OfxVolume(object):
+    """
+    A single OFX document carved out of a (possibly concatenated)
+    multi-document stream, together with the outcome of parsing it.
+    """
+    def __init__(self):
+        # Byte offset of this volume in the original stream
+        self.offset = 0
+        # Raw bytes of this volume
+        self.data = six.b('')
+        # 'sgml' for OFX 1.x header files, 'xml' for OFX 2.x, else None
+        self.format = None
+        self.headers = odict.OrderedDict()
+        self.ofx = None
+        self.success = False
+        self.error = None
+
+    @property
+    def accounts(self):
+        if self.ofx is None:
+            return []
+        return self.ofx.accounts
+
+    @property
+    def account(self):
+        accounts = self.accounts
+        if accounts:
+            return accounts[0]
+        return None
+
+    def __repr__(self):
+        return "<OfxVolume offset=%s format=%s success=%s>" % (
+            self.offset, self.format, self.success)
+
+
 class Ofx(object):
     def __str__(self):
         return ""
@@ -370,6 +405,103 @@ class OfxParserException(Exception):
 
 
 class OfxParser(object):
+    # A new volume starts at a line that opens an OFX 1.x header block
+    # (OFXHEADER:<digits>) or an OFX 2.x processing instruction, with an
+    # optional <?xml ...?> declaration immediately before it.  Requiring
+    # the line-anchored "OFXHEADER:" header form keeps the mere word
+    # "OFXHEADER" (e.g. inside a transaction memo) from starting a volume.
+    VOLUME_START_RE = re.compile(
+        six.b(r'(?im)^[ \t]*(?:OFXHEADER[ \t]*:[ \t]*\d+'
+              r'|(?:<\?xml\b[^?]*\?>[ \t]*\r?\n[ \t]*)?<\?OFX[ \t])')
+    )
+
+    @classmethod
+    def split_volumes(cls, data):
+        '''
+        Split raw OFX bytes into a list of (offset, chunk) tuples, one per
+        concatenated document.  Offsets are byte positions in the original
+        data.  Splitting relies only on document headers, so a volume that
+        is missing its closing tags does not swallow the next one.
+        '''
+        if not isinstance(data, bytes):
+            data = data.encode('utf-8')
+        starts = [m.start() for m in cls.VOLUME_START_RE.finditer(data)]
+        if not starts:
+            if data.strip():
+                return [(0, data)]
+            return []
+        chunks = []
+        if starts[0] > 0 and data[:starts[0]].strip():
+            # Unrecognized leading bytes: keep them as a (likely broken)
+            # first volume so nothing is silently dropped.
+            chunks.append((0, data[:starts[0]]))
+        for index, start in enumerate(starts):
+            if index + 1 < len(starts):
+                end = starts[index + 1]
+            else:
+                end = len(data)
+            chunks.append((start, data[start:end]))
+        return chunks
+
+    @staticmethod
+    def detect_format(chunk):
+        '''
+        Guess the document format of a raw volume chunk: 'sgml' for OFX
+        1.x header files, 'xml' for OFX 2.x processing-instruction files.
+        '''
+        head = chunk.lstrip()[:64]
+        if head.startswith(six.b('<?')):
+            return 'xml'
+        if re.match(six.b(r'(?i)OFXHEADER[ \t]*:'), head):
+            return 'sgml'
+        return None
+
+    @classmethod
+    def parse_all(cls, file_handle, fail_fast=False,
+                  custom_date_format=None):
+        '''
+        Parse a file that may contain several complete OFX documents
+        concatenated together (e.g. by an archive vendor).
+
+        Returns a list of OfxVolume objects, one per document found.
+        Each volume records its byte offset in the original stream, its
+        format, its headers, the parsed Ofx object (with accounts) on
+        success, or the exception that made it fail.  Every volume is
+        parsed independently, so its own encoding declaration applies and
+        a broken volume never prevents the following ones from loading.
+        '''
+        if not hasattr(file_handle, 'seek'):
+            raise TypeError(six.u('parse_all() accepts a seek-able file '
+                                  'handle, not %s'
+                                  % type(file_handle).__name__))
+
+        file_handle.seek(0)
+        data = file_handle.read()
+        if not isinstance(data, bytes):
+            data = data.encode('utf-8')
+
+        volumes = []
+        for offset, chunk in cls.split_volumes(data):
+            volume = OfxVolume()
+            volume.offset = offset
+            volume.data = chunk
+            volume.format = cls.detect_format(chunk)
+            try:
+                volume.ofx = cls.parse(
+                    six.BytesIO(chunk), fail_fast=fail_fast,
+                    custom_date_format=custom_date_format)
+            except Exception as exc:
+                volume.error = exc
+                try:
+                    volume.headers = OfxFile(six.BytesIO(chunk)).headers
+                except Exception:
+                    pass
+            else:
+                volume.headers = volume.ofx.headers
+                volume.success = True
+            volumes.append(volume)
+        return volumes
+
     @classmethod
     def parse(cls, file_handle, fail_fast=True, custom_date_format=None):
         '''
