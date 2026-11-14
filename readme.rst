@@ -171,6 +171,43 @@ pass the classes for the feed and the entry extension to this method meaning
 that you can define them everywhere.
 
 
+---------------------------
+Repost Provenance Index
+---------------------------
+
+When entries are republished ("转供") through one or more intermediate sites,
+`feedgen.provenance` builds an index listing the direct contributors, all
+intermediate repost statements and the earliest confirmable origin(s) of each
+manuscript. Each manuscript keeps the authors it declares itself.
+
+Relationships are only followed when they are provable: the ``source`` a
+manuscript declares on its own record and repost statements supplied by
+integrating parties. Manuscripts sharing a title are never connected just
+because of the title. A forked chain yields several origin candidates; if two
+sites republish each other (a cycle), the index reports the segment from
+which the origin can no longer be determined instead of guessing.
+
+.. code-block:: python
+
+    from feedgen.provenance import (ArticleRecord, ProvenanceIndex,
+                                    RepostStatement)
+
+    index = ProvenanceIndex()
+    index.add_record(ArticleRecord('O', authors=['Origin Author']))
+    index.add_record(ArticleRecord('M', authors=['Editor M'], source='O'))
+    index.add_record(ArticleRecord('D', authors=['Reporter D'], source='M'))
+    # Integrator-supplied repost relationships:
+    index.add_repost(RepostStatement('D', 'O', declared_by='aggregator'))
+
+    index.index_for('D')      # provenance of one manuscript
+    index.build_index()       # plain, JSON-serializable list for all of them
+
+An index can also be built directly from a feed; each entry id identifies the
+manuscript and its declared ``source`` becomes a declared relationship::
+
+    index = ProvenanceIndex.from_feed(fg, repost_statements)
+
+
 ---------------------
 Testing the Generator
 ---------------------
