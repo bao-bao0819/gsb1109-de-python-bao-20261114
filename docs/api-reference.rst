@@ -52,8 +52,15 @@ Misc methods
 ~~~~~~~~~~~~
 
 .. automethod:: SSAFile.remove_miscellaneous_events
+.. automethod:: SSAFile.merge_duplicate_events
 .. automethod:: SSAFile.equals
 .. automethod:: SSAFile.sort
+
+``MergeReport`` --- traceable merge results
+-----------------------------------------------
+
+.. automodule:: pysubs2.merge
+   :members:
 
 
 ``SSAEvent`` --- one subtitle

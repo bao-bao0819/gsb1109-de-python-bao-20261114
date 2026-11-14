@@ -2,7 +2,7 @@
 
 import io
 import logging
-from collections.abc import Iterable, Iterator, MutableSequence
+from collections.abc import Callable, Hashable, Iterable, Iterator, MutableSequence
 from itertools import chain
 from pathlib import Path
 from typing import Any, ClassVar, Literal, TextIO, Unpack, overload, override
@@ -18,6 +18,7 @@ from .formats.tmp import TmpFormat
 from .formats.ttml import TTMLFormat
 from .formats.webvtt import WebVTTFormat
 from .formats.whisper import WhisperJAXFormat
+from .merge import MergeReport, merge_duplicate_events
 from .ssaevent import SSAEvent
 from .ssastyle import SSAStyle
 from .time import make_time, ms_to_str
@@ -1043,6 +1044,9 @@ class SSAFile(MutableSequence[SSAEvent]):
         - SSA drawing tags
         - Less than two characters of text
         - Duplicated text with identical time interval (only the first event is kept)
+
+        .. tip :: For a traceable merge of duplicated events based on source,
+            speaker and time overlap, use :meth:`SSAFile.merge_duplicate_events`.
         """
         new_events: list[SSAEvent] = []
 
@@ -1066,6 +1070,65 @@ class SSAFile(MutableSequence[SSAEvent]):
             new_events.append(e)
 
         self.events = new_events
+
+    def merge_duplicate_events(
+        self,
+        *,
+        source: str | Callable[[SSAEvent], Hashable] | None = None,
+        speaker: str | Callable[[SSAEvent], str | None] = "name",
+        overlap_threshold: float = 0.5,
+        previous: MergeReport | None = None,
+    ) -> MergeReport:
+        """
+        Merge duplicated subtitles in-place, returning a traceable report.
+
+        This is a merge mode for event cleaning (eg. of training corpora):
+        when the same sentence appears twice at overlapping times - like a
+        line typeset once at the top and once at the bottom of the screen -
+        only the first event is kept. Two people saying the same thing at the
+        same time (eg. both answering "yes") are attributed to different
+        speakers and thus both kept.
+
+        Two events are considered duplicates when they have identical
+        :attr:`SSAEvent.plaintext` (after stripping), equal ``source`` keys
+        and their time intervals overlap by at least ``overlap_threshold``
+        (relative to the shorter event). Events with different known speakers
+        are never merged. An event with unknown speaker may be folded into a
+        group, but never in a way that would join two different known
+        speakers into one group; such ambiguous events are kept and listed in
+        :attr:`MergeReport.review` for manual review. Comment lines, drawing
+        tags and empty lines are not eligible for merging.
+
+        Arguments:
+            source: How to determine the origin of an event - an
+                :class:`SSAEvent` attribute name (eg. ``"style"``) or a
+                callable taking an event and returning a hashable key. Only
+                events from the same source are merged. By default, all
+                events are considered to be from one source.
+            speaker: How to determine who said a line - an :class:`SSAEvent`
+                attribute name or a callable taking an event and returning
+                the speaker name (empty/``None`` means unknown). By default,
+                the :attr:`SSAEvent.name` (actor) field is used.
+            overlap_threshold: Minimal time overlap of duplicated events,
+                as a fraction of the shorter event (0 to 1, default 0.5).
+            previous: Report from an earlier merge of this subtitle file.
+                When reprocessing an already merged file, pass the previous
+                report here so that line numbers in the new report still
+                refer to the original file.
+
+        Returns:
+            :class:`MergeReport` mapping each kept line to the original line
+            numbers folded into it, plus events flagged for review.
+
+        """
+        self.events, report = merge_duplicate_events(
+            self.events,
+            source=source,
+            speaker=speaker,
+            overlap_threshold=overlap_threshold,
+            previous=previous,
+        )
+        return report
 
     def get_text_events(self) -> list[SSAEvent]:
         """
