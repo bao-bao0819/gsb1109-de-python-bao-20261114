@@ -5,17 +5,27 @@ from .formats import whisper
 from .ssaevent import SSAEvent
 from .ssafile import SSAFile
 from .ssastyle import SSAStyle
+from .vttsegments import (
+    QuarantinedVTTCue,
+    SegmentedVTTImportResult,
+    VTTSegment,
+    import_vtt_segments,
+)
 
 __all__ = [
     "VERSION",
     "Alignment",
     "Color",
+    "QuarantinedVTTCue",
     "SSAEvent",
     "SSAFile",
     "SSAStyle",
+    "SegmentedVTTImportResult",
+    "VTTSegment",
     "cli",
     "exceptions",
     "formats",
+    "import_vtt_segments",
     "load",
     "load_from_whisper",
     "make_time",

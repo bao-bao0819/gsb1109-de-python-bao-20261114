@@ -21,6 +21,7 @@ from .formats.whisper import WhisperJAXFormat
 from .ssaevent import SSAEvent
 from .ssastyle import SSAStyle
 from .time import make_time, ms_to_str
+from .vttsegments import QuarantinedVTTCue
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,8 @@ class SSAFile(MutableSequence[SSAEvent]):
         graphics_opaque: Dict with embedded images, ie. ``[Graphics]``.
         fps: Framerate used when reading the file, if applicable.
         format: Format of source subtitle file, if applicable, eg. ``"srt"``.
+        quarantine: Cues that could not be placed on the program timeline during
+            segmented WebVTT import (see :mod:`pysubs2.vttsegments`); empty otherwise.
 
     """
 
@@ -66,6 +69,7 @@ class SSAFile(MutableSequence[SSAEvent]):
     graphics_opaque: dict[str, Any]
     fps: float | None
     format: str | None
+    quarantine: list[QuarantinedVTTCue]
 
     def __init__(self) -> None:
         self.events = []
@@ -76,6 +80,7 @@ class SSAFile(MutableSequence[SSAEvent]):
         self.graphics_opaque = {}
         self.fps = None
         self.format = None
+        self.quarantine = []
 
     # ------------------------------------------------------------------------
     # I/O methods - overloads per format

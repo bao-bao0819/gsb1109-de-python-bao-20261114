@@ -119,6 +119,45 @@ Example file::
     00:00:00.000 --> 00:01:00.000
     Example subtitle
 
+Merging archived livestream segments
+++++++++++++++++++++++++++++++++++++
+
+Archived livestreams often arrive as a sequence of WebVTT segments rather than a single
+file. Concatenating them directly breaks when the media clock wraps around (cues after
+the wrap would be scheduled before the opening cues) or when the stream switches to a
+different program source whose clock restarts near zero.
+
+The segment importer accepts, per segment, a sequence number, a discontinuity marker and
+an optional ``(local_ms, program_ms)`` time map, and places every cue on a single program
+timeline:
+
+- Segments with a time map are anchored by the map, which handles wraparounds and source
+  switches precisely.
+- Without a time map, segments continue the current anchor; a backwards-running local
+  clock is treated as a wraparound and the anchor is lifted by whole clock periods so the
+  segments join up.
+- A discontinuous segment without a time map is treated as a program source switch: its
+  cues are quarantined (exposed on :attr:`pysubs2.SSAFile.quarantine`) and the anchor is
+  reset, so following segments cannot borrow time from the previous program. Segments
+  remain quarantined until a time map establishes a new anchor.
+- Re-delivered segments (same sequence and identical cues) are imported only once.
+
+Example::
+
+    from pysubs2 import SSAFile, VTTSegment
+
+    segments = [
+        VTTSegment(sequence=0, text=segment_0_text),
+        VTTSegment(sequence=1, text=segment_1_text),  # local clock wrapped
+        VTTSegment(sequence=2, text=segment_2_text, discontinuous=True),
+        VTTSegment(sequence=3, text=segment_3_text, time_map=(0, 120000)),
+    ]
+    subs = SSAFile.from_string("WEBVTT\n", "vtt", segments=segments)
+    # subs.quarantine holds cues from segment 2 until a map re-anchors the new source
+
+See :func:`pysubs2.vttsegments.import_vtt_segments` for the full semantics and the
+standalone function returning placed and quarantined cues separately.
+
 .. versionchanged:: 1.0.0
    Added basic support for WebVTT subtitle format.
 

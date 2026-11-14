@@ -13,7 +13,7 @@ API Reference
 -------------------------------
 
 .. autoclass:: pysubs2.SSAFile
-   :members: events, styles, info, fps, format, aegisub_project, fonts_opaque
+   :members: events, styles, info, fps, format, aegisub_project, fonts_opaque, quarantine
 
 Reading and writing subtitles
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -88,6 +88,12 @@ Misc methods
 .. automodule:: pysubs2.warnings
    :members:
    :show-inheritance:
+
+``pysubs2.vttsegments`` --- merging archived WebVTT segments
+------------------------------------------------------------
+
+.. automodule:: pysubs2.vttsegments
+   :members:
 
 ``pysubs2.formats`` --- subtitle format implementations
 -------------------------------------------------------

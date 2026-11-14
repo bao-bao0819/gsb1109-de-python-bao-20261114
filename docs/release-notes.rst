@@ -1,6 +1,18 @@
 Release Notes
 =============
 
+**1.10.0** --- unreleased
+
+- Added support for importing archived WebVTT livestream segments onto a single program
+  timeline via the new :mod:`pysubs2.vttsegments` module and the ``segments`` keyword
+  argument of WebVTT readers. Segment sequence numbers, discontinuity markers and
+  per-segment time maps are used to place cues correctly across media clock wraparounds
+  and program source switches; re-delivered segments are imported only once. Cues from
+  segments without a usable timeline anchor (eg. after a source switch with no new time
+  map) are quarantined on :attr:`pysubs2.SSAFile.quarantine` instead of borrowing time
+  from the previous program, and a :class:`pysubs2.warnings.QuarantinedSegmentWarning`
+  is raised.
+
 **1.9.1** --- released on 2026-10-30
 
 - SRT parser is more conservative about removing subtitle indices (Issue #119)
