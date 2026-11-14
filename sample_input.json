@@ -1,0 +1,228 @@
+{
+  "table": "filiale",
+  "fields": [
+    {
+      "name": "knr",
+      "type": "C",
+      "length": 6
+    },
+    {
+      "name": "name",
+      "type": "C",
+      "length": 20
+    },
+    {
+      "name": "betrag",
+      "type": "N",
+      "length": 10,
+      "decimal": 2
+    },
+    {
+      "name": "notiz",
+      "type": "M"
+    }
+  ],
+  "records": [
+    {
+      "key": "r1",
+      "values": {
+        "knr": "100001",
+        "name": "Altona",
+        "betrag": 120.5,
+        "notiz": "FPT memo block r1 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    {
+      "key": "r2",
+      "values": {
+        "knr": "100002",
+        "name": "Barmbek",
+        "betrag": 98.0,
+        "notiz": "FPT memo block r2 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    },
+    {
+      "key": "r3",
+      "values": {
+        "knr": "100003",
+        "name": "Cuxhaven",
+        "betrag": 250.75,
+        "notiz": "FPT memo block r3 cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      }
+    },
+    {
+      "key": "r4",
+      "values": {
+        "knr": "100004",
+        "name": "Dulmen",
+        "betrag": 410.1,
+        "notiz": "FPT memo block r4 dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      }
+    },
+    {
+      "key": "r5",
+      "values": {
+        "knr": "100005",
+        "name": "Emden",
+        "betrag": 77.4,
+        "notiz": "FPT memo block r5 eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      }
+    }
+  ],
+  "payloads": [
+    {
+      "digest": "b6c0a3ac05304f0f2c87034b30e70ec87f96b112824cd594eddcddac430ae254",
+      "records": []
+    },
+    {
+      "digest": "0865f01e5d79715a8a412828b47e1129f94fc521f19e8f5b864b38e8bb12c533",
+      "records": [
+        "r1"
+      ]
+    },
+    {
+      "digest": "03f29237af6c4480729e1d957c83a43e8a8b8504b5bf5f5a0d11966f7a705727",
+      "records": [
+        "r1",
+        "r2"
+      ]
+    },
+    {
+      "digest": "971a5d1bb89c27f949de4f4d1b5c5bd4a8665adb6e30d845f72634f36b211865",
+      "records": [
+        "r1",
+        "r2",
+        "r3"
+      ]
+    },
+    {
+      "digest": "8d60a8ecb1aa72df62586762e18433a50f671d2caef22eac95733796feb7adca",
+      "records": [
+        "r1",
+        "r2",
+        "r4"
+      ]
+    },
+    {
+      "digest": "d4fce407596441479804c9135d8fdd93173b5bb72ca81b198c7668a40c8b9d61",
+      "records": [
+        "r5"
+      ]
+    },
+    {
+      "digest": "61cfe5663db57e57e1e6318e459eddc52a491035727b6b5af619380d7760b7c8",
+      "records": [
+        "r4",
+        "r5"
+      ]
+    }
+  ],
+  "branches": [
+    {
+      "name": "nord",
+      "held": [
+        "03f29237af6c4480729e1d957c83a43e8a8b8504b5bf5f5a0d11966f7a705727"
+      ],
+      "needs": [
+        "r1",
+        "r2",
+        "r3"
+      ],
+      "target": "971a5d1bb89c27f949de4f4d1b5c5bd4a8665adb6e30d845f72634f36b211865"
+    },
+    {
+      "name": "sued",
+      "held": [
+        "b6c0a3ac05304f0f2c87034b30e70ec87f96b112824cd594eddcddac430ae254"
+      ],
+      "needs": [
+        "r1",
+        "r2",
+        "r4"
+      ],
+      "target": "8d60a8ecb1aa72df62586762e18433a50f671d2caef22eac95733796feb7adca"
+    },
+    {
+      "name": "ost",
+      "held": [
+        "b6c0a3ac05304f0f2c87034b30e70ec87f96b112824cd594eddcddac430ae254"
+      ],
+      "needs": [
+        "r1",
+        "r2",
+        "r3"
+      ],
+      "target": "971a5d1bb89c27f949de4f4d1b5c5bd4a8665adb6e30d845f72634f36b211865"
+    }
+  ],
+  "packages": [
+    {
+      "id": "f-pc",
+      "kind": "full",
+      "to": "971a5d1bb89c27f949de4f4d1b5c5bd4a8665adb6e30d845f72634f36b211865",
+      "bytes": 4200
+    },
+    {
+      "id": "f-pd",
+      "kind": "full",
+      "to": "8d60a8ecb1aa72df62586762e18433a50f671d2caef22eac95733796feb7adca",
+      "bytes": 4300
+    },
+    {
+      "id": "d-p0-pa",
+      "kind": "delta",
+      "from": "b6c0a3ac05304f0f2c87034b30e70ec87f96b112824cd594eddcddac430ae254",
+      "to": "0865f01e5d79715a8a412828b47e1129f94fc521f19e8f5b864b38e8bb12c533",
+      "bytes": 800
+    },
+    {
+      "id": "d-pa-pb",
+      "kind": "delta",
+      "from": "0865f01e5d79715a8a412828b47e1129f94fc521f19e8f5b864b38e8bb12c533",
+      "to": "03f29237af6c4480729e1d957c83a43e8a8b8504b5bf5f5a0d11966f7a705727",
+      "bytes": 800
+    },
+    {
+      "id": "d-p0-pb",
+      "kind": "delta",
+      "from": "b6c0a3ac05304f0f2c87034b30e70ec87f96b112824cd594eddcddac430ae254",
+      "to": "03f29237af6c4480729e1d957c83a43e8a8b8504b5bf5f5a0d11966f7a705727",
+      "bytes": 1500
+    },
+    {
+      "id": "d-pb-pc",
+      "kind": "delta",
+      "from": "03f29237af6c4480729e1d957c83a43e8a8b8504b5bf5f5a0d11966f7a705727",
+      "to": "971a5d1bb89c27f949de4f4d1b5c5bd4a8665adb6e30d845f72634f36b211865",
+      "bytes": 900
+    },
+    {
+      "id": "d-pb-pd",
+      "kind": "delta",
+      "from": "03f29237af6c4480729e1d957c83a43e8a8b8504b5bf5f5a0d11966f7a705727",
+      "to": "8d60a8ecb1aa72df62586762e18433a50f671d2caef22eac95733796feb7adca",
+      "bytes": 950
+    },
+    {
+      "id": "d-px-py",
+      "kind": "delta",
+      "from": "d4fce407596441479804c9135d8fdd93173b5bb72ca81b198c7668a40c8b9d61",
+      "to": "61cfe5663db57e57e1e6318e459eddc52a491035727b6b5af619380d7760b7c8",
+      "bytes": 60
+    },
+    {
+      "id": "d-py-px",
+      "kind": "delta",
+      "from": "61cfe5663db57e57e1e6318e459eddc52a491035727b6b5af619380d7760b7c8",
+      "to": "d4fce407596441479804c9135d8fdd93173b5bb72ca81b198c7668a40c8b9d61",
+      "bytes": 50
+    },
+    {
+      "id": "d-py-pd",
+      "kind": "delta",
+      "from": "61cfe5663db57e57e1e6318e459eddc52a491035727b6b5af619380d7760b7c8",
+      "to": "8d60a8ecb1aa72df62586762e18433a50f671d2caef22eac95733796feb7adca",
+      "bytes": 120
+    }
+  ]
+}
