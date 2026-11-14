@@ -191,6 +191,12 @@ class OfxPreprocessedFile(OfxFile):
 class Ofx(object):
     def __str__(self):
         return ""
+
+    def match_transfers(self, **kwargs):
+        """Pair security transfers reported by the accounts in this file."""
+        from .transfers import match_transfers
+        return match_transfers(self, **kwargs)
+
 #        headers = "\r\n".join(":".join(el if el else "NONE" for el in item)
 #        for item in six.iteritems(self.headers))
 #        headers += "\r\n\r\n"

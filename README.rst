@@ -106,7 +106,7 @@ Here's a sample program
     position.market_value
 
   # Security
-  
+
   security = transaction.security
   # or
   security = position.security
@@ -114,7 +114,64 @@ Here's a sample program
   security.name
   security.ticker
   security.memo
-  
+
+Matching transfers across accounts
+==================================
+
+A security transfer is normally reported twice: an outgoing record in the
+delivering account and an incoming record in the receiving account.  The two
+FITIDs are usually different, so the records have to be matched on security,
+direction, units and date.
+
+.. code:: python
+
+  from ofxparse import OfxParser, match_transfers
+
+  ofx_a = OfxParser.parse(open('account_a.ofx', 'rb'))
+  ofx_b = OfxParser.parse(open('account_b.ofx', 'rb'))
+
+  result = match_transfers([ofx_a, ofx_b], settlement_window='3d')
+
+  for pair in result.pairs:
+      pair.outgoing.account_id, pair.outgoing.fitid
+      pair.incoming.account_id, pair.incoming.fitid
+      pair.min_quantity, pair.max_quantity   # equal when unambiguous
+
+  for item in result.unmatched:
+      item.record.account_id, item.record.security
+      item.record.direction
+      item.remaining_quantity                 # units still looking for a home
+      item.reason
+
+``match_transfers`` accepts one OFX result, an account, a statement, or any
+iterable of those.  It can also be called as ``ofx.match_transfers()``.  The
+``settlement_window`` is the largest allowed difference between the two
+records' settlement dates (trade dates are used when one side lacks a
+settlement date); it takes a ``timedelta``, a number of days, or strings such
+as ``"3d"`` or ``"P3D"``.  Pass ``None`` to disable the date check.  Records
+without any usable date are left unmatched when the window is enforced, with
+``reason == "missing_date"``.
+
+Units are treated as capacities, so one outgoing record may be split across
+several incoming records, and several outgoing records may be allocated to one
+incoming record.  Each record's units are used at most once.  The allocation is
+solved as a maximum flow; when several allocations transfer the same maximum
+number of units, only relationships that occur in *every* such allocation are
+reported in ``result.pairs``.  Each pair then carries ``min_quantity`` and
+``max_quantity``; a pair whose range still starts at zero is listed in
+``result.ambiguities`` instead of being presented as a confirmed relationship.
+
+For each record, ``remaining_quantity`` is the quantity that is still
+unmatched (quantity minus the largest amount any valid allocation assigns to
+it), and ``definitely_unmatched_quantity`` is the amount that is unmatched
+in *every* valid allocation.  ``result.remaining_for(record)`` returns the
+former, ``result.total_unmatched_outgoing`` / ``result.total_unmatched_incoming``
+derive the totals from the maximum flow (so they do not depend on the chosen
+allocation), and ``result.render()`` prints a short report.
+
+The command line helper prints the same information::
+
+  python utils/ofxmatch.py account_a.ofx account_b.ofx --window 3d
 
 Help!
 =====
