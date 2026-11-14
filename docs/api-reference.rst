@@ -89,6 +89,12 @@ Misc methods
    :members:
    :show-inheritance:
 
+``pysubs2.sampler`` --- recording window selection
+---------------------------------------------------
+
+.. automodule:: pysubs2.sampler
+   :members:
+
 ``pysubs2.formats`` --- subtitle format implementations
 -------------------------------------------------------
 

@@ -1,7 +1,16 @@
-from . import cli, exceptions, formats, time
+from . import cli, exceptions, formats, sampler, time
 from .common import VERSION, Alignment, Color
 from .exceptions import *
 from .formats import whisper
+from .sampler import (
+    CandidateWindow,
+    ExclusionReason,
+    SelectionResult,
+    Utterance,
+    WindowViolation,
+    select_windows,
+    utterances_from_events,
+)
 from .ssaevent import SSAEvent
 from .ssafile import SSAFile
 from .ssastyle import SSAStyle
@@ -9,17 +18,25 @@ from .ssastyle import SSAStyle
 __all__ = [
     "VERSION",
     "Alignment",
+    "CandidateWindow",
     "Color",
+    "ExclusionReason",
     "SSAEvent",
     "SSAFile",
     "SSAStyle",
+    "SelectionResult",
+    "Utterance",
+    "WindowViolation",
     "cli",
     "exceptions",
     "formats",
     "load",
     "load_from_whisper",
     "make_time",
+    "sampler",
+    "select_windows",
     "time",
+    "utterances_from_events",
     "whisper",
 ]
 
