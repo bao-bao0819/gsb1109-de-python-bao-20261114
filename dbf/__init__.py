@@ -82,6 +82,14 @@ from .tables import CodePage, FieldnameList, RecordTemplate
 from .tables import Db3Table, ClpTable, FpTable, VfpTable
 from .tables import RecordVaporWare
 
+from .corrections import TriState, BlankPolicy, CellState, KEEP, SET, CLEAR
+from .corrections import BLANK_KEEP, BLANK_SET, BLANK_CLEAR
+from .corrections import CorrectionRow, CorrectionChange, CorrectionConflict
+from .corrections import CorrectionReport, CorrectionPlan, Correction
+from .corrections import CorrectionError, CorrectionInputError, CorrectionConflictError
+from .corrections import apply_corrections, import_corrections, correct_records
+from .corrections import apply_record_corrections, plan_corrections
+
 api = fake_module('api',
     'Table', 'Record', 'List', 'Index', 'Relation', 'Iter', 'Null', 'Char', 'Date', 'DateTime', 'Time',
     'Logical', 'Quantum', 'CodePage', 'create_template', 'delete', 'field_names', 'gather', 'is_deleted',
@@ -92,6 +100,13 @@ api = fake_module('api',
     'FieldSpecError', 'NonUnicodeError', 'NotFoundError',
     'DbfWarning', 'Eof', 'Bof', 'DoNotIndex', 'FieldNameWarning', 'IndexLocation',
     'Process', 'Templates', 'CLOSED', 'READ_ONLY', 'READ_WRITE',
+    'TriState', 'BlankPolicy', 'CellState', 'KEEP', 'SET', 'CLEAR',
+    'BLANK_KEEP', 'BLANK_SET', 'BLANK_CLEAR',
+    'CorrectionRow', 'CorrectionChange', 'CorrectionConflict',
+    'CorrectionReport', 'CorrectionPlan', 'Correction',
+    'CorrectionError', 'CorrectionInputError', 'CorrectionConflictError',
+    'apply_corrections', 'import_corrections', 'correct_records',
+    'apply_record_corrections', 'plan_corrections',
     )
 
 api.register()
@@ -115,4 +130,11 @@ __all__ = (
         'CodePage', 'FieldnameList', 'RecordTemplate',
         'Db3Table', 'ClpTable', 'FpTable', 'VfpTable',
         'RecordVaporWare',
+        'TriState', 'BlankPolicy', 'CellState', 'KEEP', 'SET', 'CLEAR',
+        'BLANK_KEEP', 'BLANK_SET', 'BLANK_CLEAR',
+        'CorrectionRow', 'CorrectionChange', 'CorrectionConflict',
+        'CorrectionReport', 'CorrectionPlan', 'Correction',
+        'CorrectionError', 'CorrectionInputError', 'CorrectionConflictError',
+        'apply_corrections', 'import_corrections', 'correct_records',
+        'apply_record_corrections', 'plan_corrections',
         )

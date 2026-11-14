@@ -2,6 +2,17 @@ What's New
 ==========
 
 
+0.99.002
+--------
+
+add sparse correction imports with explicit KEEP / CLEAR / SET blank policy
+per batch, per column, and per row
+merge rows sharing a composite key; isolate conflicting fields while
+applying compatible fields
+fix memo clearing: an empty or None memo now writes a zero block pointer
+and stores no memo block
+
+
 0.99.001
 --------
 

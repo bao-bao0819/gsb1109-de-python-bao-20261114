@@ -146,3 +146,68 @@ Creating/writing a DBF:
             print('--------')
 
     table.close()
+
+Sparse Corrections
+------------------
+
+Correction sheets often carry only the columns being changed, and an
+empty cell may mean either "this field was not supplied" or "clear this
+field".  Every import therefore declares a three-state blank convention:
+
+``dbf.KEEP``
+    The empty cell means the value was not supplied; leave it alone.
+
+``dbf.CLEAR``
+    The empty cell means "empty this field" (which is also how a memo
+    field is cleared).
+
+``dbf.SET``
+    The empty cell is itself the value (useful for character fields);
+    clearing a non-text field is always ``CLEAR``.
+
+Set the batch convention with ``blank=``, refine it per column with
+``column_blanks=``, and let one row override either choice with
+``CorrectionRow(blank=...)`` or a ``__blank__`` column::
+
+    import dbf
+
+    table = dbf.Table('customers.dbf')
+    table.open(dbf.READ_WRITE)
+
+    rows = [
+        # empty region cells are values here, but an empty memo clears it
+        {'id': 'A001', 'region': '', 'note': ''},
+        ]
+    report = dbf.apply_corrections(
+            table,
+            rows,
+            key_fields=['id', 'line'],          # composite key
+            blank=dbf.KEEP,                     # default: absent
+            column_blanks={'region': dbf.SET, 'note': dbf.CLEAR},
+            )
+
+Real values ``0`` and ``False`` are corrections, not blanks, and are
+always written.  ``dbf.Null`` may be used explicitly for nullable
+columns.
+
+Rows with the same composite key are merged.  If two rows supply
+different values for one field, that field is reported in
+``report.conflicts`` (and exposed as an isolated field on the change),
+while all compatible fields from both rows are still applied together::
+
+    report = dbf.apply_corrections(
+            table,
+            [
+                {'id': 'A001', 'qty': '0', 'note': 'first'},
+                {'id': 'A001', 'qty': '0', 'note': 'second'},
+                ],
+            key_fields=['id'],
+            blank=dbf.KEEP,
+            )
+    report.changes[0].values             # {'QTY': 0} (NOTE isolated)
+    report.conflict_fields               # [('A001', 'NOTE')]
+
+Use ``dbf.plan_corrections`` to preview without writing, ``strict=True``
+to abort the whole batch on any conflict, unmatched key, or ambiguous
+key before anything is written, and ``report.require_clean()`` to turn
+any recorded problem into an exception.

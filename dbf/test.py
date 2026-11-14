@@ -5544,6 +5544,474 @@ class TestMisc(TestCase):
         dbf.Table(self.table_wierd.filename)
 
 
+class TestCorrections(TestCase):
+    "sparse correction import semantics"
+
+    def setUp(self):
+        self.dbf_table = Table(
+                os.path.join(tempdir, 'correction_table'),
+                'k1 C(5); k2 C(5); name C(10); qty N(6,2); paid L; note M; day D',
+                dbf_type='db3',
+                overwrite=True,
+                )
+        table = self.dbf_table
+        table.open(READ_WRITE)
+        table.append({
+                'k1': 'a', 'k2': '1', 'name': 'first', 'qty': 5,
+                'paid': True, 'note': 'original', 'day': dbf.Date(2020, 1, 2),
+                })
+        table.append({
+                'k1': 'a', 'k2': '2', 'name': 'second', 'qty': 7,
+                'paid': False, 'note': 'another', 'day': dbf.Date(2021, 2, 3),
+                })
+        table.close()
+
+    def tearDown(self):
+        self.dbf_table.close()
+
+    def test_default_keep_leaves_blanks_untouched(self):
+        table = self.dbf_table
+        table.open(READ_WRITE)
+        report = dbf.apply_corrections(
+                table,
+                [{'k1': 'a', 'k2': '1', 'name': '', 'qty': '', 'paid': ''}],
+                ['k1', 'k2'],
+                )
+        self.assertEqual(report.changes[0].values, {})
+        self.assertEqual(report.applied_count, 0)
+        self.assertEqual(table[0].name.strip(), 'first')
+        self.assertEqual(table[0].qty, 5)
+        self.assertTrue(table[0].paid)
+
+    def test_default_clear_clears_blanks_but_keeps_absent_fields(self):
+        table = self.dbf_table
+        table.open(READ_WRITE)
+        report = dbf.apply_corrections(
+                table,
+                [{'k1': 'a', 'k2': '1', 'name': '', 'qty': '', 'paid': '', 'note': ''}],
+                ['k1', 'k2'],
+                blank=dbf.CLEAR,
+                )
+        self.assertEqual(report.applied_count, 1)
+        record = table[0]
+        self.assertEqual(record.name.strip(), '')
+        self.assertIsNone(record.qty)
+        self.assertFalse(record.paid)
+        self.assertEqual(record.note, '')
+        self.assertEqual(record.day, dbf.Date(2020, 1, 2))
+
+    def test_default_set_stores_explicit_blank(self):
+        table = self.dbf_table
+        table.open(READ_WRITE)
+        dbf.apply_corrections(
+                table,
+                [{'k1': 'a', 'k2': '1', 'name': ''}],
+                ['k1', 'k2'],
+                blank=dbf.SET,
+                )
+        self.assertEqual(table[0].name.strip(), '')
+
+    def test_per_column_policy(self):
+        table = self.dbf_table
+        table.open(READ_WRITE)
+        dbf.apply_corrections(
+                table,
+                [{'k1': 'a', 'k2': '1', 'name': '', 'qty': ''}],
+                ['k1', 'k2'],
+                blank=dbf.KEEP,
+                column_blanks={'name': dbf.CLEAR},
+                )
+        self.assertEqual(table[0].name.strip(), '')
+        self.assertEqual(table[0].qty, 5)
+        self.assertEqual(table[0].paid, True)
+
+        dbf.write(table[0], name='first', qty=5, paid=True)
+        dbf.apply_corrections(
+                table,
+                [{'k1': 'a', 'k2': '1', 'name': '', 'qty': ''}],
+                ['k1', 'k2'],
+                blank={'*': dbf.KEEP, 'qty': dbf.CLEAR},
+                )
+        self.assertEqual(table[0].name.strip(), 'first')
+        self.assertIsNone(table[0].qty)
+
+    def test_row_override(self):
+        table = self.dbf_table
+        table.open(READ_WRITE)
+        rows = [
+                dbf.CorrectionRow(
+                    {'k1': 'a', 'k2': '1', 'name': '', 'qty': ''},
+                    blank={'name': dbf.CLEAR},
+                    ),
+                {'k1': 'a', 'k2': '2', 'name': '', 'qty': '', '__blank__': dbf.CLEAR},
+                ]
+        dbf.apply_corrections(table, rows, ['k1', 'k2'], blank=dbf.KEEP)
+        self.assertEqual(table[0].name.strip(), '')
+        self.assertEqual(table[0].qty, 5)
+        self.assertEqual(table[1].name.strip(), '')
+        self.assertIsNone(table[1].qty)
+
+    def test_zero_false_and_memo_clear_reach_target(self):
+        table = self.dbf_table
+        table.open(READ_WRITE)
+        dbf.apply_corrections(
+                table,
+                [{'k1': 'a', 'k2': '1', 'qty': '0', 'paid': 'false', 'note': ''}],
+                ['k1', 'k2'],
+                blank=dbf.CLEAR,
+                )
+        record = table[0]
+        self.assertEqual(record.qty, 0)
+        self.assertFalse(record.paid)
+        self.assertEqual(record.note, '')
+        note_start, note_end = table._meta['NOTE'][1], table._meta['NOTE'][3]
+        self.assertEqual(
+                bytes(record._data[note_start:note_end]).strip(), b'')
+        table.close()
+        table.open(READ_WRITE)
+        record = table[0]
+        self.assertEqual(record.qty, 0)
+        self.assertFalse(record.paid)
+        self.assertEqual(record.note, '')
+        self.assertEqual(record.name.strip(), 'first')
+
+    def test_clear_memo_does_not_allocate_a_block(self):
+        table = self.dbf_table
+        table.open(READ_WRITE)
+        record = table[0]
+        note_start, note_end = table._meta['NOTE'][1], table._meta['NOTE'][3]
+        before = int(bytes(record._data[note_start:note_end]).strip())
+        dbf.apply_corrections(
+                table, [{'k1': 'a', 'k2': '1', 'note': ''}], ['k1', 'k2'],
+                blank=dbf.CLEAR)
+        self.assertTrue(before)
+        self.assertEqual(
+                bytes(record._data[note_start:note_end]).strip(), b'')
+        self.assertNotEqual(
+                bytes(table[1]._data[note_start:note_end]).strip(), b'')
+
+    def test_numeric_zero_is_not_blank(self):
+        table = self.dbf_table
+        table.open(READ_WRITE)
+        report = dbf.apply_corrections(
+                table,
+                [{'k1': 'a', 'k2': '1', 'qty': 0, 'paid': False}],
+                ['k1', 'k2'],
+                blank=dbf.KEEP,
+                )
+        self.assertEqual(report.changes[0].values['QTY'], 0)
+        self.assertIs(report.changes[0].values['PAID'], False)
+        self.assertEqual(table[0].qty, 0)
+        self.assertFalse(table[0].paid)
+
+    def test_conflict_is_isolated_per_field(self):
+        table = self.dbf_table
+        table.open(READ_WRITE)
+        rows = [
+                {'k1': 'a', 'k2': '1', 'name': 'one', 'qty': '11'},
+                {'k1': 'a', 'k2': '1', 'name': 'two', 'qty': '11'},
+                ]
+        report = dbf.apply_corrections(
+                table, rows, ['k1', 'k2'], blank=dbf.KEEP)
+        self.assertEqual(report.conflict_fields, [(('a', '1'), 'NAME')])
+        change = report.changes[0]
+        self.assertEqual(change.values['QTY'], 11)
+        self.assertNotIn('NAME', change.values)
+        self.assertTrue(change.applied)
+        self.assertEqual(table[0].qty, 11)
+        self.assertEqual(table[0].name.strip(), 'first')
+
+    def test_conflict_ignores_identical_values(self):
+        table = self.dbf_table
+        table.open(READ_WRITE)
+        rows = [
+                {'k1': 'a', 'k2': '1', 'name': 'same', 'qty': '1.50'},
+                {'k1': 'a', 'k2': '1', 'name': 'same', 'qty': '1.5'},
+                ]
+        report = dbf.apply_corrections(table, rows, ['k1', 'k2'])
+        self.assertEqual(report.conflicts, [])
+        self.assertEqual(report.changes[0].values['NAME'], 'same')
+        self.assertEqual(report.changes[0].values['QTY'], 1.5)
+
+    def test_strict_conflict_raises_without_writing(self):
+        table = self.dbf_table
+        table.open(READ_WRITE)
+        rows = [
+                {'k1': 'a', 'k2': '1', 'name': 'one', 'qty': '11'},
+                {'k1': 'a', 'k2': '1', 'name': 'two', 'qty': '11'},
+                {'k1': 'a', 'k2': '2', 'qty': '12'},
+                ]
+        self.assertRaises(
+                dbf.CorrectionConflictError,
+                dbf.apply_corrections, table, rows, ['k1', 'k2'], strict=True,
+                )
+        self.assertEqual(table[0].qty, 5)
+        self.assertEqual(table[0].name.strip(), 'first')
+        self.assertEqual(table[1].qty, 7)
+
+    def test_strict_unmatched_raises_without_writing(self):
+        table = self.dbf_table
+        table.open(READ_WRITE)
+        rows = [
+                {'k1': 'a', 'k2': '2', 'qty': '12'},
+                {'k1': 'missing', 'k2': '9', 'qty': '1'},
+                ]
+        self.assertRaises(
+                dbf.CorrectionInputError,
+                dbf.apply_corrections, table, rows, ['k1', 'k2'], strict=True,
+                )
+        self.assertEqual(table[1].qty, 7)
+
+    def test_dry_run_reports_without_writing(self):
+        table = self.dbf_table
+        table.open(READ_WRITE)
+        report = dbf.plan_corrections(
+                table,
+                [{'k1': 'a', 'k2': '1', 'qty': '0', 'name': 'changed'}],
+                ['k1', 'k2'],
+                )
+        self.assertTrue(report.dry_run)
+        self.assertEqual(report.applied_count, 0)
+        self.assertEqual(report.changes[0].after['QTY'], 0)
+        self.assertEqual(table[0].qty, 5)
+        self.assertEqual(table[0].name.strip(), 'first')
+
+    def test_unmatched_and_ambiguous_keys(self):
+        table = self.dbf_table
+        table.open(READ_WRITE)
+        table.append({'k1': 'b', 'k2': '1', 'name': 'dupe'})
+        table.append({'k1': 'b', 'k2': '1', 'name': 'dupe again'})
+        report = dbf.apply_corrections(
+                table,
+                [
+                    {'k1': 'missing', 'k2': '9', 'name': 'x'},
+                    {'k1': 'b', 'k2': '1', 'name': 'y'},
+                    ],
+                ['k1', 'k2'],
+                )
+        self.assertEqual(report.unmatched, [('missing', '9')])
+        self.assertEqual(report.ambiguous, [('b', '1')])
+        self.assertEqual(report.applied_count, 0)
+
+    def test_csv_with_row_override(self):
+        table = self.dbf_table
+        table.open(READ_WRITE)
+        filename = os.path.join(tempdir, 'corrections.csv')
+        with codecs.open(filename, 'w', 'utf-8') as fd:
+            fd.write('k1,k2,name,qty,__blank__\n')
+            fd.write('a,1,,0,clear\n')
+            fd.write('a,2,kept,,keep\n')
+        report = dbf.apply_corrections(table, filename, ['k1', 'k2'])
+        self.assertEqual(report.applied_count, 2)
+        self.assertEqual(table[0].name.strip(), '')
+        self.assertEqual(table[0].qty, 0)
+        self.assertEqual(table[1].name.strip(), 'kept')
+        self.assertEqual(table[1].qty, 7)
+
+    def test_table_helpers(self):
+        table = self.dbf_table
+        table.open(READ_WRITE)
+        report = table.plan_corrections(
+                [{'k1': 'a', 'k2': '1', 'qty': '9'}], ['k1', 'k2'])
+        self.assertTrue(report.dry_run)
+        report = table.apply_corrections(
+                [{'k1': 'a', 'k2': '1', 'qty': '9'}], ['k1', 'k2'])
+        self.assertEqual(report.applied_count, 1)
+        self.assertEqual(table[0].qty, 9)
+
+    def test_callable_key_and_string_key_fields(self):
+        table = self.dbf_table
+        table.open(READ_WRITE)
+        report = dbf.apply_corrections(
+                table,
+                [{'k1': 'a', 'k2': '1', 'qty': '9'}],
+                'k1 k2',
+                )
+        self.assertEqual(report.applied_count, 1)
+        self.assertEqual(table[0].qty, 9)
+
+        report = dbf.apply_corrections(
+                table,
+                [{'k1': 'a', 'k2': '1', 'qty': '10'}],
+                lambda row: (row['k1'], row['k2']),
+                )
+        self.assertEqual(report.applied_count, 1)
+        self.assertEqual(table[0].qty, 10)
+
+        report = dbf.apply_corrections(
+                table,
+                [{'k1': 'a', 'k2': '1', 'qty': '11'}],
+                lambda rec: (rec.k1.strip(), rec.k2.strip()),
+                )
+        self.assertEqual(report.applied_count, 1)
+        self.assertEqual(table[0].qty, 11)
+
+    def test_vfp_zero_false_null_and_binary_memo_clear(self):
+        table = Table(
+                os.path.join(tempdir, 'correction_vfp'),
+                'k C(5); i I; b B; y Y; l L NULL; n N(5,0) NULL; m M; g G NULL',
+                dbf_type='vfp',
+                overwrite=True,
+                )
+        table.open(READ_WRITE)
+        table.append({
+                'k': 'a', 'i': 5, 'b': 1.5, 'y': 2.5, 'l': True, 'n': 7,
+                'm': 'hello', 'g': b'blob',
+                })
+        report = dbf.apply_corrections(
+                table,
+                [{'k': 'a', 'i': '0', 'b': '0', 'y': '0', 'l': 'false',
+                  'n': '0', 'm': '', 'g': b''}],
+                'k',
+                blank=dbf.CLEAR,
+                )
+        self.assertEqual(report.errors, [])
+        record = table[0]
+        self.assertEqual(record.i, 0)
+        self.assertEqual(record.b, 0)
+        self.assertEqual(record.y, 0)
+        self.assertFalse(record.l)
+        self.assertEqual(record.n, 0)
+        self.assertEqual(record.m, '')
+        self.assertEqual(record.g, b'')
+        table.close()
+        table.open(READ_WRITE)
+        record = table[0]
+        self.assertEqual(record.i, 0)
+        self.assertEqual(record.b, 0)
+        self.assertEqual(record.y, 0)
+        self.assertFalse(record.l)
+        self.assertEqual(record.n, 0)
+        self.assertEqual(record.m, '')
+        self.assertEqual(record.g, b'')
+        table.close()
+
+    def test_nullable_field_explicit_null(self):
+        table = Table(
+                os.path.join(tempdir, 'correction_null'),
+                'k C(5); l L NULL; n N(5,0) NULL',
+                dbf_type='vfp',
+                overwrite=True,
+                )
+        table.open(READ_WRITE)
+        table.append({'k': 'a', 'l': True, 'n': 7})
+        report = dbf.apply_corrections(
+                table,
+                [{'k': 'a', 'l': dbf.Null, 'n': dbf.Null}],
+                'k',
+                )
+        self.assertEqual(report.errors, [])
+        self.assertIs(table[0].l, dbf.Null)
+        self.assertIs(table[0].n, dbf.Null)
+        table.close()
+
+    def test_batch_policy_mapping(self):
+        table = self.dbf_table
+        table.open(READ_WRITE)
+        dbf.apply_corrections(
+                table,
+                [{'k1': 'a', 'k2': '1', 'name': '', 'qty': '', 'note': ''}],
+                ['k1', 'k2'],
+                blank={'*': dbf.KEEP, 'note': dbf.CLEAR},
+                )
+        self.assertEqual(table[0].name.strip(), 'first')
+        self.assertEqual(table[0].qty, 5)
+        self.assertEqual(table[0].note, '')
+
+    def test_headerless_csv_and_tuples(self):
+        table = self.dbf_table
+        table.open(READ_WRITE)
+        filename = os.path.join(tempdir, 'corrections_headerless.csv')
+        with codecs.open(filename, 'w', 'utf-8') as fd:
+            fd.write('a,1,changed,0,false\n')
+        report = dbf.apply_corrections(
+                table,
+                filename,
+                ['k1', 'k2'],
+                columns=['k1', 'k2', 'name', 'qty', 'paid'],
+                has_header=False,
+                blank=dbf.KEEP,
+                )
+        self.assertEqual(report.applied_count, 1)
+        self.assertEqual(table[0].name.strip(), 'changed')
+        self.assertEqual(table[0].qty, 0)
+        self.assertFalse(table[0].paid)
+
+        report = dbf.apply_corrections(
+                table,
+                [('a', '1', 'tuple')],
+                ['k1', 'k2'],
+                columns=['k1', 'k2', 'name'],
+                blank=dbf.KEEP,
+                )
+        self.assertEqual(report.applied_count, 1)
+        self.assertEqual(table[0].name.strip(), 'tuple')
+
+    def test_tab_delimited_csv(self):
+        table = self.dbf_table
+        table.open(READ_WRITE)
+        filename = os.path.join(tempdir, 'corrections_tab.csv')
+        with codecs.open(filename, 'w', 'utf-8') as fd:
+            fd.write('k1\tk2\tname\n')
+            fd.write('a\t1\t\n')
+        report = dbf.apply_corrections(
+                table, filename, ['k1', 'k2'], delimiter='\t',
+                blank=dbf.CLEAR,
+                )
+        self.assertEqual(report.applied_count, 1)
+        self.assertEqual(table[0].name.strip(), '')
+
+    def test_invalid_values_raise_input_error(self):
+        table = self.dbf_table
+        table.open(READ_WRITE)
+        self.assertRaises(
+                dbf.CorrectionInputError,
+                dbf.apply_corrections,
+                table,
+                [{'k1': 'a', 'k2': '1', 'qty': 'oops'}],
+                ['k1', 'k2'],
+                )
+        self.assertRaises(
+                dbf.CorrectionInputError,
+                dbf.apply_corrections,
+                table,
+                [{'k1': 'a', 'k2': '1', 'paid': 'maybe'}],
+                ['k1', 'k2'],
+                )
+        self.assertEqual(table[0].qty, 5)
+        self.assertTrue(table[0].paid)
+
+    def test_require_clean(self):
+        table = self.dbf_table
+        table.open(READ_WRITE)
+        rows = [
+                {'k1': 'a', 'k2': '1', 'name': 'one'},
+                {'k1': 'a', 'k2': '1', 'name': 'two'},
+                ]
+        report = dbf.apply_corrections(table, rows, ['k1', 'k2'])
+        self.assertFalse(report.ok)
+        self.assertRaises(dbf.CorrectionConflictError, report.require_clean)
+
+    def test_unknown_field_is_rejected(self):
+        table = self.dbf_table
+        table.open(READ_WRITE)
+        self.assertRaises(
+                dbf.CorrectionInputError,
+                dbf.apply_corrections,
+                table,
+                [{'k1': 'a', 'k2': '1', 'nope': 'x'}],
+                ['k1', 'k2'],
+                )
+        report = dbf.apply_corrections(
+                table,
+                [{'k1': 'a', 'k2': '1', 'nope': 'x'}],
+                ['k1', 'k2'],
+                ignore_unknown_fields=True,
+                )
+        self.assertEqual(report.applied_count, 0)
+        self.assertEqual(report.changes[0].values, {})
+
+
 class TestWhatever(TestCase):
     "move tests here to run one at a time while debugging"
 

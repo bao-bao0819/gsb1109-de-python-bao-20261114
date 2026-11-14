@@ -1278,7 +1278,7 @@ class _DbfMemo(object):
         """
         Stores data in memo file, returns block number
         """
-        if self.meta.ignorememos or data == '':
+        if self.meta.ignorememos or not data:
             return 0
         if self.meta.location == IN_MEMORY:
             thismemo = self.nextmemo
@@ -1731,7 +1731,7 @@ def update_memo(string, fielddef, memo, decoder, encoder):
     if memo is None:
         raise DbfError('Memos are being ignored, unable to update')
     if string == None:
-        string = b''
+        return b''
     if fielddef[FLAGS] & BINARY:
         if not isinstance(string, bytes):
             raise ValueError('binary field: %r not in bytes format' % string)
@@ -1741,7 +1741,7 @@ def update_memo(string, fielddef, memo, decoder, encoder):
         string = encoder(string)[0]
     block = memo.put_memo(string)
     if block == 0:
-        block = b''
+        return b' ' * fielddef[LENGTH]
     return ("%*s" % (fielddef[LENGTH], block)).encode('ascii')
 
 def retrieve_numeric(bytes, fielddef, *ignore):
@@ -3727,6 +3727,20 @@ class Table(_Navigation):
         set fields to allow null values -- NO LONGER ALLOWED, MUST BE SET AT TABLE CREATION
         """
         raise DbfError('fields can only be set to allow NULLs at table creation')
+
+    def apply_corrections(self, rows=None, key_fields=None, **kwargs):
+        """
+        apply sparse corrections to this table (see dbf.apply_corrections)
+        """
+        from .corrections import apply_corrections
+        return apply_corrections(self, rows, key_fields, **kwargs)
+
+    def plan_corrections(self, rows=None, key_fields=None, **kwargs):
+        """
+        review sparse corrections without changing the table
+        """
+        from .corrections import plan_corrections
+        return plan_corrections(self, rows, key_fields, **kwargs)
 
     def append(self, data=b'', drop=False, multiple=1):
         """
