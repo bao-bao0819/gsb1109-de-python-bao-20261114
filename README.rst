@@ -68,7 +68,7 @@ Here's a sample program
   statement.transactions        # A list of InvestmentTransaction objects
 
   # Transaction
-  
+
   for transaction in statement.transactions:
     transaction.payee
     transaction.type
@@ -80,6 +80,34 @@ Here's a sample program
     transaction.sic
     transaction.mcc
     transaction.checknum
+
+  # Posting date precision, offsets and business-day classification
+
+  transaction.dtposted          # Structured OfxDate
+  transaction.raw_date          # Exact DTPOSTED text from the bank
+  transaction.date_only         # True for YYYYMMDD, false for a timestamp
+  transaction.date_precision    # "date" or "datetime"
+  transaction.fraction          # Fractional-second digits, exactly as reported
+  transaction.reported_offset   # timedelta, or None when no offset was sent
+  transaction.reported_offset_string  # e.g. "-05:00"
+  transaction.timezone_name     # e.g. "EST"
+  transaction.utc_datetime      # Only when both a time and an offset exist
+  transaction.utc_sort_key      # Total UTC ordering key
+
+  # Configure the local wall-clock switch time when parsing.
+  ofx = OfxParser.parse(fileobj, business_day_cutoff="06:00")
+
+  transaction.business_date              # One date, or None if ambiguous
+  transaction.possible_business_dates    # All compatible business dates
+  statement.sort_transactions_by_utc()
+
+A date-only ``DTPOSTED`` has no time of day; it is exposed as
+``transaction.date`` (a ``date``), never silently completed to midnight.
+Its ``local_datetime``/``utc_datetime`` are ``None``.  When the business-day
+switch time is not midnight, a date-only posting can belong to either the
+named day or the next day, so ``business_date`` is ``None`` and
+``possible_business_dates`` lists both candidates.  ``transaction.date`` for
+a complete timestamp remains the historical naive-UTC ``datetime``.
 
   # InvestmentTransaction
   

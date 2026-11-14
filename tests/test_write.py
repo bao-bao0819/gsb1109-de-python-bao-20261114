@@ -32,6 +32,14 @@ class TestOfxWrite(TestCase):
         printer.writeToFile(output_buffer, tabs=1)
         assert output_buffer.getvalue().startswith("OFXHEADER")
 
+    def test_printer_preserves_reported_posting_date(self):
+        with open_file('bank_medium.ofx') as f:
+            ofx = OfxParser.parse(f)
+        output_buffer = StringIO()
+        printer = OfxPrinter(ofx=ofx, filename=None)
+        printer.writeToFile(output_buffer, tabs=1)
+        assert '<DTPOSTED>20090401122017.000[-5:EST]' in output_buffer.getvalue()
+
 if __name__ == "__main__":
     import unittest
     unittest.main()

@@ -45,6 +45,249 @@ def is_iterable(candidate):
     return isinstance(candidate, Iterable)
 
 
+_OFX_DATE_LEADING_RE = re.compile(
+    r'^([0-9]+)(?:\.([0-9]*))?')
+_OFX_DATE_TZ_RE = re.compile(
+    r'\[\s*([-+]?[0-9]+(?:\.[0-9]+)?)\s*(?::([^\]]*))?\s*\]')
+_UTC = datetime.timedelta(0)
+
+
+class _OfxFixedOffset(datetime.tzinfo):
+    """A fixed UTC offset that also remembers the OFX timezone name."""
+
+    def __init__(self, offset, name=None):
+        self._offset = offset
+        self._name = name
+
+    def utcoffset(self, dt):
+        return self._offset
+
+    def dst(self, dt):
+        return datetime.timedelta(0)
+
+    def tzname(self, dt):
+        return self._name
+
+    def __repr__(self):
+        return '<OfxFixedOffset %s%s>' % (
+            self._offset,
+            ':' + self._name if self._name else '')
+
+    def __reduce__(self):
+        return (_OfxFixedOffset, (self._offset, self._name))
+
+
+def _restore_ofx_date(state):
+    parsed = six.text_type.__new__(OfxDate, state['raw'])
+    parsed.__dict__.update(state)
+    return parsed
+
+
+class OfxDate(six.text_type):
+    """A parsed OFX date with its original precision and offsets.
+
+    OFX dates are either a calendar day (``YYYYMMDD``) or a complete local
+    wall-clock timestamp (``YYYYMMDDHHMMSS.fff[offset:name]``).  This object
+    keeps those distinctions instead of immediately collapsing them into a
+    naive UTC ``datetime``.  A date-only value has no ``local_datetime`` or
+    ``wall_datetime``: midnight is never invented.
+
+    The value is also a string equal to the exact ``DTPOSTED`` text, so it
+    can be stored or compared without losing the bank's original rendering.
+    """
+
+    def __new__(cls, raw, date_only, date, local_datetime=None,
+                offset=None, offset_hours=None, offset_name=None,
+                offset_text=None, fraction=None, fraction_value=None,
+                microsecond=0):
+        return six.text_type.__new__(cls, raw)
+
+    def __init__(self, raw, date_only, date, local_datetime=None,
+                 offset=None, offset_hours=None, offset_name=None,
+                 offset_text=None, fraction=None, fraction_value=None,
+                 microsecond=0):
+        self.raw = raw
+        self.date_only = date_only
+        self.original_date_only = date_only
+        self.has_time = not date_only
+        self.date = date
+        self.offset = offset
+        self.offset_hours = offset_hours
+        self.offset_name = offset_name
+        self.offset_text = offset_text
+        self.fraction = fraction
+        self.fraction_value = fraction_value
+        self.microsecond = microsecond
+        self.has_offset = offset is not None
+
+        # ``local_datetime`` is only meaningful for a complete timestamp.
+        self._legacy_local = local_datetime
+        self.local_datetime = local_datetime if self.has_time else None
+        self.midnight_assumed = False
+
+        if self.has_time and self.has_offset:
+            tzinfo = _OfxFixedOffset(offset, offset_name)
+            self.wall_datetime = local_datetime.replace(tzinfo=tzinfo)
+            self.utc_datetime = (
+                local_datetime - offset).replace(
+                    tzinfo=_OfxFixedOffset(_UTC, 'UTC'))
+        else:
+            self.wall_datetime = self.local_datetime
+            self.utc_datetime = None
+
+        # Absolute time is only known when a time and an explicit offset
+        # were present.  A bare date is not evidence of midnight.
+        self.absolute_datetime = self.utc_datetime
+        self.date_precision = 'date' if date_only else 'datetime'
+        self.precision = self.date_precision
+
+    @property
+    def reported_offset(self):
+        return self.offset
+
+    @property
+    def reported_offset_hours(self):
+        return self.offset_hours
+
+    @property
+    def reported_offset_text(self):
+        return self.offset_text
+
+    @property
+    def offset_string(self):
+        return self.reported_offset_string
+
+    @property
+    def reported_offset_string(self):
+        if self.offset is None:
+            return None
+        seconds = int(self.offset.total_seconds())
+        sign = '+' if seconds >= 0 else '-'
+        seconds = abs(seconds)
+        hours, remainder = divmod(seconds, 3600)
+        minutes = remainder // 60
+        if remainder % 60:
+            return '%s%02d:%02d:%02d' % (
+                sign, hours, minutes, remainder % 60)
+        return '%s%02d:%02d' % (sign, hours, minutes)
+
+    @property
+    def timezone_name(self):
+        return self.offset_name
+
+    @property
+    def utc(self):
+        return self.utc_datetime
+
+    @property
+    def datetime(self):
+        return self.local_datetime
+
+    @property
+    def granularity(self):
+        return self.date_precision
+
+    def to_datetime(self):
+        """Return the local wall-clock datetime, or ``None`` for a date."""
+        return self.local_datetime
+
+    def business_day(self, cutoff=None):
+        return self.business_date(cutoff)
+
+    def possible_business_days(self, cutoff=None):
+        return self.possible_business_dates(cutoff)
+
+    def legacy_datetime(self):
+        """Return the historical naive-UTC value used by ``Transaction.date``.
+
+        Date-only values keep the old midnight convention here for
+        backwards compatibility; use ``date`` or
+        ``possible_business_dates`` when midnight would be misleading.
+        """
+        value = self.local_datetime or self._legacy_local or \
+            datetime.datetime.combine(self.date, datetime.time(0, 0))
+        if self.offset is not None:
+            value = value - self.offset
+        return value
+
+    def business_date(self, cutoff=None):
+        """Return a definite business date, or ``None`` when ambiguous."""
+        possible = self.possible_business_dates(cutoff)
+        if len(possible) == 1:
+            return possible[0]
+        return None
+
+    def possible_business_dates(self, cutoff=None):
+        """Return all business dates compatible with this posting value.
+
+        A business day rolls forward at ``cutoff``: a posting at or after
+        the cutoff on calendar day ``D`` belongs to business day ``D + 1``;
+        an earlier posting belongs to ``D``.
+
+        A date-only value does not imply midnight.  When the cutoff is not
+        midnight it could fall on either side of the switch, so both adjacent
+        business dates are reported.
+        """
+        cutoff = OfxParser.normalize_business_day_cutoff(cutoff)
+        day = self.date
+        if not self.has_time:
+            if cutoff == datetime.time(0, 0):
+                return [day]
+            return [day, day + datetime.timedelta(days=1)]
+
+        if cutoff != datetime.time(0, 0) and \
+                self.local_datetime.time() >= cutoff:
+            day = day + datetime.timedelta(days=1)
+        return [day]
+
+    def __repr__(self):
+        return '<OfxDate %r precision=%s>' % (self.raw, self.date_precision)
+
+    def __eq__(self, other):
+        if isinstance(other, datetime.datetime):
+            return self.legacy_datetime() == other
+        if isinstance(other, datetime.date):
+            return self.date == other
+        return six.text_type.__eq__(self, other)
+
+    def __ne__(self, other):
+        result = self.__eq__(other)
+        if result is NotImplemented:
+            return result
+        return not result
+
+    def __hash__(self):
+        return six.text_type.__hash__(self)
+
+    def __reduce__(self):
+        return (_restore_ofx_date, (self.__dict__,))
+
+    def __getattr__(self, name):
+        # Delegate incidental string operations not defined on OfxDate.
+        try:
+            raw = object.__getattribute__(self, 'raw')
+        except AttributeError:
+            raise AttributeError(name)
+        return getattr(raw, name)
+
+
+OFXDate = OfxDate
+PostedDate = OfxDate
+
+
+def utc_sort_key(transaction):
+    """Module-level helper matching ``Transaction.utc_sort_key``."""
+    key = transaction.utc_sort_key
+    if callable(key):
+        key = key()
+    return key
+
+
+def sort_transactions_by_utc(transactions):
+    """Sort transactions by known UTC instant; unknown times sort last."""
+    return sorted(transactions, key=utc_sort_key)
+
+
 @contextlib.contextmanager
 def save_pos(fh):
     """
@@ -293,22 +536,148 @@ class Statement(object):
         self.end_date = ''
         self.currency = ''
         self.transactions = []
+        self._business_day_cutoff = datetime.time(0, 0)
         # Error tracking:
         self.discarded_entries = []
         self.warnings = []
+
+    @property
+    def business_day_cutoff(self):
+        return self._business_day_cutoff
+
+    @business_day_cutoff.setter
+    def business_day_cutoff(self, value):
+        value = OfxParser.normalize_business_day_cutoff(value)
+        self._business_day_cutoff = value
+        for transaction in self.transactions:
+            transaction.business_day_cutoff = value
+
+    @property
+    def business_day_switch_time(self):
+        return self.business_day_cutoff
+
+    @business_day_switch_time.setter
+    def business_day_switch_time(self, value):
+        self.business_day_cutoff = OfxParser.normalize_business_day_cutoff(
+            value)
+
+    def sort_transactions_by_utc(self):
+        """Return transactions ordered by known UTC instant.
+
+        Transactions without both a time and an explicit offset sort last
+        rather than being silently treated as UTC.
+        """
+        return sort_transactions_by_utc(self.transactions)
+
+    @property
+    def sorted_transactions(self):
+        return self.sort_transactions_by_utc()
+
+    def transactions_by_business_date(self, cutoff=None):
+        """Group transactions by definite business date.
+
+        Transactions whose business date is ambiguous are returned under
+        the ``None`` key instead of being assigned a fabricated day.  Use
+        ``transactions_by_possible_business_date`` when every candidate day
+        should be populated.
+        """
+        if cutoff is None:
+            cutoff = self.business_day_cutoff
+        grouped = collections.OrderedDict()
+        for transaction in self.transactions:
+            key = transaction.get_business_date(cutoff)
+            grouped.setdefault(key, []).append(transaction)
+        return grouped
+
+    def transactions_by_possible_business_date(self, cutoff=None):
+        """Group transactions under every compatible business date.
+
+        Ambiguous, date-only postings appear under both candidate days.
+        Each transaction remains available via
+        ``possible_business_dates`` for an explicit audit trail.
+        """
+        if cutoff is None:
+            cutoff = self.business_day_cutoff
+        grouped = collections.OrderedDict()
+        for transaction in self.transactions:
+            for key in transaction.possible_business_dates(cutoff):
+                grouped.setdefault(key, []).append(transaction)
+        return grouped
+
+    def ambiguous_business_date_transactions(self, cutoff=None):
+        if cutoff is None:
+            cutoff = self.business_day_cutoff
+        return [transaction for transaction in self.transactions
+                if transaction.get_business_date(cutoff) is None]
 
 
 class InvestmentStatement(object):
     def __init__(self):
         self.positions = []
         self.transactions = []
+        self.business_day_cutoff = datetime.time(0, 0)
         # Error tracking:
         self.discarded_entries = []
         self.warnings = []
 
+    @property
+    def business_day_switch_time(self):
+        return self.business_day_cutoff
+
+    @business_day_switch_time.setter
+    def business_day_switch_time(self, value):
+        self.business_day_cutoff = OfxParser.normalize_business_day_cutoff(
+            value)
+
+    def sort_transactions_by_utc(self):
+        return sort_transactions_by_utc(self.transactions)
+
+    @property
+    def sorted_transactions(self):
+        return self.sort_transactions_by_utc()
+
+
+class _BusinessDate(datetime.date):
+    """A business date that can also be recomputed with another cutoff."""
+
+    def __new__(cls, value, transaction=None):
+        result = datetime.date.__new__(cls, value.year, value.month,
+                                       value.day)
+        result._transaction = transaction
+        return result
+
+    def __call__(self, cutoff=None):
+        if self._transaction is None:
+            return self
+        return self._transaction.get_business_date(cutoff)
+
+    def __reduce__(self):
+        return datetime.date, (self.year, self.month, self.day)
+
+
+class _BusinessDateList(list):
+    """A list of candidate business dates that is also cutoff-callable."""
+
+    def __init__(self, values, transaction=None):
+        super(_BusinessDateList, self).__init__(values)
+        self._transaction = transaction
+
+    def __call__(self, cutoff=None, **kwargs):
+        if 'business_day_cutoff' in kwargs:
+            cutoff = kwargs.pop('business_day_cutoff')
+        if kwargs:
+            raise TypeError('Unexpected arguments: %s' % (
+                ', '.join(sorted(kwargs)),))
+        if self._transaction is None:
+            return list(self)
+        return self._transaction.get_possible_business_dates(cutoff)
+
+    def __reduce__(self):
+        return list, (list(self),)
+
 
 class Transaction(object):
-    def __init__(self):
+    def __init__(self, business_day_cutoff=None, dtposted=None):
         self.payee = ''
         self.type = ''
         self.date = None
@@ -319,6 +688,283 @@ class Transaction(object):
         self.sic = None
         self.mcc = ''
         self.checknum = ''
+        # Structured posting date.  ``date`` above remains the historical
+        # naive-UTC value for backwards compatibility.
+        self._dtposted = None
+        self.posting = None
+        self._business_day_cutoff = \
+            OfxParser.normalize_business_day_cutoff(business_day_cutoff)
+        if dtposted is not None:
+            self.dtposted = dtposted
+
+    @property
+    def business_day_cutoff(self):
+        return self._business_day_cutoff
+
+    @business_day_cutoff.setter
+    def business_day_cutoff(self, value):
+        self._business_day_cutoff = \
+            OfxParser.normalize_business_day_cutoff(value)
+
+    @property
+    def business_day_switch_time(self):
+        return self.business_day_cutoff
+
+    @business_day_switch_time.setter
+    def business_day_switch_time(self, value):
+        self.business_day_cutoff = OfxParser.normalize_business_day_cutoff(
+            value)
+
+    @property
+    def dtposted(self):
+        return self._dtposted
+
+    @dtposted.setter
+    def dtposted(self, value):
+        if value is None or isinstance(value, OfxDate):
+            parsed = value
+        elif isinstance(value, six.string_types):
+            parsed = OfxParser.parseOfxDate(value)
+        elif isinstance(value, datetime.datetime):
+            if value.tzinfo is not None:
+                offset = value.utcoffset()
+                offset_hours = offset.total_seconds() / 3600.0
+                offset_name = value.tzname()
+            else:
+                offset = None
+                offset_hours = None
+                offset_name = None
+            parsed = OfxDate(
+                raw=value.strftime('%Y%m%d%H%M%S.%f'),
+                date_only=False,
+                date=value.date(),
+                local_datetime=value.replace(tzinfo=None),
+                offset=offset,
+                offset_hours=offset_hours,
+                offset_name=offset_name,
+                offset_text=None,
+                microsecond=value.microsecond,
+            )
+        elif isinstance(value, datetime.date):
+            parsed = OfxDate(
+                raw=value.strftime('%Y%m%d'),
+                date_only=True,
+                date=value,
+            )
+        else:
+            raise TypeError("dtposted must be an OFX date string or OfxDate")
+        self._dtposted = parsed
+        self.posting = parsed
+        if parsed is None:
+            self.date = None
+        elif parsed.has_time:
+            # Preserve the historical naive-UTC datetime for exact times.
+            self.date = parsed.legacy_datetime()
+        else:
+            # A date-only DTPOSTED has no time of day.  Do not invent
+            # midnight; expose the calendar day and use ``legacy_date`` if
+            # the old midnight-based value is needed.
+            self.date = parsed.date
+
+    @property
+    def legacy_date(self):
+        """The old naive-UTC value, retaining the midnight convention."""
+        return self.posting.legacy_datetime() if self.posting else None
+
+    @property
+    def raw_date(self):
+        """The raw ``DTPOSTED`` text, exactly as reported by the bank."""
+        return self.dtposted.raw if self.dtposted is not None else None
+
+    @property
+    def raw_date_string(self):
+        return self.raw_date
+
+    @property
+    def posted(self):
+        return self.posting
+
+    @property
+    def date_only(self):
+        return bool(self.posting and self.posting.date_only)
+
+    @property
+    def has_time(self):
+        return bool(self.posting and self.posting.has_time)
+
+    @property
+    def date_precision(self):
+        return self.posting.date_precision if self.posting else None
+
+    @property
+    def precision(self):
+        return self.date_precision
+
+    @property
+    def fraction(self):
+        return self.posting.fraction if self.posting else None
+
+    @property
+    def fractional_seconds(self):
+        return self.fraction_value
+
+    @property
+    def fraction_value(self):
+        return self.posting.fraction_value if self.posting else None
+
+    @property
+    def microsecond(self):
+        return self.posting.microsecond if self.posting else None
+
+    @property
+    def has_offset(self):
+        return bool(self.posting and self.posting.has_offset)
+
+    @property
+    def offset(self):
+        return self.posting.offset if self.posting else None
+
+    @property
+    def reported_offset(self):
+        return self.posting.offset if self.posting else None
+
+    @property
+    def utc_offset(self):
+        return self.reported_offset
+
+    @property
+    def tz_offset(self):
+        return self.reported_offset
+
+    @property
+    def reported_offset_hours(self):
+        return self.posting.offset_hours if self.posting else None
+
+    @property
+    def reported_offset_text(self):
+        return self.posting.offset_text if self.posting else None
+
+    @property
+    def reported_offset_string(self):
+        return self.posting.reported_offset_string if self.posting else None
+
+    @property
+    def offset_string(self):
+        return self.reported_offset_string
+
+    @property
+    def timezone_name(self):
+        return self.posting.offset_name if self.posting else None
+
+    @property
+    def tz_name(self):
+        return self.timezone_name
+
+    @property
+    def tzinfo(self):
+        return self.posting.wall_datetime.tzinfo \
+            if self.posting and self.posting.wall_datetime else None
+
+    def utcoffset(self):
+        return self.reported_offset
+
+    def tzname(self):
+        return self.timezone_name
+
+    @property
+    def posted_datetime(self):
+        """The wall-clock datetime, aware only when an offset was reported."""
+        return self.posting.wall_datetime if self.posting else None
+
+    @property
+    def wall_datetime(self):
+        return self.posted_datetime
+
+    @property
+    def local_datetime(self):
+        return self.posting.local_datetime if self.posting else None
+
+    @property
+    def utc_datetime(self):
+        """The UTC instant, available only with a time and reported offset."""
+        return self.posting.utc_datetime if self.posting else None
+
+    @property
+    def utc(self):
+        return self.utc_datetime
+
+    @property
+    def datetime_utc(self):
+        return self.utc_datetime
+
+    @property
+    def utc_naive(self):
+        utc = self.utc_datetime
+        if utc is None:
+            return None
+        return utc.replace(tzinfo=None)
+
+    @property
+    def utc_naive_datetime(self):
+        return self.utc_naive
+
+    def get_possible_business_dates(self, cutoff=None):
+        if self.posting is None:
+            return _BusinessDateList([], self)
+        if cutoff is None:
+            cutoff = self.business_day_cutoff
+        values = [
+            _BusinessDate(value, self)
+            for value in self.posting.possible_business_dates(cutoff)
+        ]
+        return _BusinessDateList(values, self)
+
+    @property
+    def possible_business_dates(self):
+        return self.get_possible_business_dates()
+
+    @property
+    def possible_business_days(self):
+        return self.get_possible_business_dates()
+
+    def business_dates(self, cutoff=None):
+        return list(self.get_possible_business_dates(cutoff))
+
+    def get_business_date(self, cutoff=None):
+        """Return the settled business date, or ``None`` when not unique."""
+        if self.posting is None:
+            return None
+        if cutoff is None:
+            cutoff = self.business_day_cutoff
+        value = self.posting.business_date(cutoff)
+        if value is None:
+            return None
+        return _BusinessDate(value, self)
+
+    @property
+    def business_date(self):
+        return self.get_business_date()
+
+    def business_day(self, cutoff=None):
+        """Recompute the business date, optionally with another cutoff."""
+        return self.get_business_date(cutoff)
+
+    def with_business_day_cutoff(self, cutoff):
+        self.business_day_cutoff = cutoff
+        return self
+
+    @property
+    def utc_sort_key(self):
+        """A total ordering key derived from reported UTC evidence."""
+        utc = self.utc_datetime
+        if utc is None:
+            return (1, datetime.datetime.max, '', self.raw_date or '')
+        # Report the offset and raw evidence alongside the instant so
+        # distinct postings never collapse into one another.
+        return (0, utc, self.reported_offset_string or '',
+                self.raw_date or '')
+
+    sort_key = utc_sort_key
 
     def __repr__(self):
         return "<Transaction units=" + str(self.amount) + ">"
@@ -371,7 +1017,8 @@ class OfxParserException(Exception):
 
 class OfxParser(object):
     @classmethod
-    def parse(cls, file_handle, fail_fast=True, custom_date_format=None):
+    def parse(cls, file_handle, fail_fast=True, custom_date_format=None,
+              business_day_cutoff=None, **kwargs):
         '''
         parse is the main entry point for an OfxParser. It takes a file
         handle and an optional log_errors flag.
@@ -382,9 +1029,30 @@ class OfxParser(object):
         guarantee that no exceptions will be raised to the caller, only
         that statements will include bad transactions (which are marked).
 
+        ``business_day_cutoff`` is the local wall-clock time at which a
+        statement's business day rolls over.  It may be a ``datetime.time``
+        or a string such as ``"06:00"``.  The value is recorded for each
+        transaction so callers can classify postings later.
+
         '''
+        cutoff_aliases = (
+            'business_day_switch_time', 'business_day_start',
+            'business_day_cutoff_time', 'cutoff_time', 'cutoff')
+        for alias in cutoff_aliases:
+            if alias in kwargs:
+                value = kwargs.pop(alias)
+                if business_day_cutoff is not None:
+                    raise TypeError(
+                        'business_day_cutoff was given more than once')
+                business_day_cutoff = value
+        if kwargs:
+            raise TypeError('Unexpected arguments: %s' % (
+                ', '.join(sorted(kwargs)),))
+
         cls.fail_fast = fail_fast
         cls.custom_date_format = custom_date_format
+        cls.business_day_cutoff = cls.normalize_business_day_cutoff(
+            business_day_cutoff)
 
         if not hasattr(file_handle, 'seek'):
             raise TypeError(six.u('parse() accepts a seek-able file handle\
@@ -472,7 +1140,88 @@ class OfxParser(object):
         if ofx_obj.accounts:
             ofx_obj.account = ofx_obj.accounts[0]
 
+        ofx_obj.business_day_cutoff = getattr(
+            cls, 'business_day_cutoff', datetime.time(0, 0))
         return ofx_obj
+
+    @classmethod
+    def parseOfxDate(cls, ofxDateTime, custom_date_format=None):
+        """Parse an OFX date without discarding precision or offset.
+
+        Returns an :class:`OfxDate`.  ``parseOfxDateTime`` remains the
+        backwards-compatible entry point that returns a naive UTC
+        ``datetime``.
+        """
+        raw = ofxDateTime
+        if not isinstance(raw, six.string_types):
+            raise TypeError('OFX date must be a string')
+        value = raw.strip()
+        if value[:8] == "00000000":
+            return None
+
+        tz_match = _OFX_DATE_TZ_RE.search(value)
+        offset = None
+        offset_hours = None
+        offset_name = None
+        offset_text = None
+        date_part = value
+        if tz_match:
+            offset_hours = float(tz_match.group(1))
+            offset = datetime.timedelta(hours=offset_hours)
+            offset_name = (tz_match.group(2) or '').strip() or None
+            offset_text = tz_match.group(1)
+            date_part = value[:tz_match.start()].strip()
+
+        leading = _OFX_DATE_LEADING_RE.match(date_part)
+        if not leading:
+            raise ValueError("Invalid OFX date: %r" % (raw,))
+        digits = leading.group(1)
+        fraction_text = leading.group(2)
+        if len(digits) < 8:
+            raise ValueError("Invalid OFX date: %r" % (raw,))
+
+        # Preserve fractional seconds exactly as reported.  datetime stores
+        # microseconds, so convert the decimal digits without float rounding.
+        fraction = None
+        fraction_value = None
+        microsecond = 0
+        if fraction_text:
+            fraction = fraction_text
+            fraction_value = decimal.Decimal('0.' + fraction_text)
+            microsecond = int((fraction_text + '000000')[:6])
+
+        if len(digits) >= 14:
+            try:
+                local_date = datetime.datetime.strptime(
+                    digits[:14], '%Y%m%d%H%M%S')
+            except ValueError:
+                raise ValueError("Invalid OFX date: %r" % (raw,))
+            date_only = False
+        else:
+            date_format = custom_date_format or '%Y%m%d'
+            try:
+                local_date = datetime.datetime.strptime(digits[:8],
+                                                        date_format)
+            except ValueError:
+                raise ValueError("Invalid OFX date: %r" % (raw,))
+            date_only = True
+
+        if microsecond:
+            local_date += datetime.timedelta(microseconds=microsecond)
+
+        return OfxDate(
+            raw=raw,
+            date_only=date_only,
+            local_datetime=local_date,
+            date=local_date.date(),
+            offset=offset,
+            offset_hours=offset_hours,
+            offset_name=offset_name,
+            offset_text=offset_text,
+            fraction=fraction,
+            fraction_value=fraction_value,
+            microsecond=microsecond,
+        )
 
     @classmethod
     def parseOfxDateTime(cls, ofxDateTime):
@@ -480,33 +1229,35 @@ class OfxParser(object):
         # for 6 Nov 2010 4pm UTC-5 aka EST
 
         # Some places (e.g. Newfoundland) have non-integer offsets.
-        res = re.search(r"\[(?P<tz>[-+]?\d+\.?\d*)\:\w*\]$", ofxDateTime)
-        if res:
-            tz = float(res.group('tz'))
-        else:
-            tz = 0
+        parsed = cls.parseOfxDate(
+            ofxDateTime, getattr(cls, 'custom_date_format', None))
+        if parsed is None:
+            return None
+        return parsed.legacy_datetime()
 
-        timeZoneOffset = datetime.timedelta(hours=tz)
-
-        res = re.search(r"^[0-9]*\.([0-9]{0,5})", ofxDateTime)
-        if res:
-            msec = datetime.timedelta(seconds=float("0." + res.group(1)))
-        else:
-            msec = datetime.timedelta(seconds=0)
-
-        try:
-            local_date = datetime.datetime.strptime(ofxDateTime[:14], '%Y%m%d%H%M%S')
-            return local_date - timeZoneOffset + msec
-        except ValueError:
-            if ofxDateTime[:8] == "00000000":
-                return None
-
-            if not cls.custom_date_format:
-                return datetime.datetime.strptime(
-                    ofxDateTime[:8], '%Y%m%d') - timeZoneOffset + msec
-            else:
-                return datetime.datetime.strptime(
-                    ofxDateTime[:8], cls.custom_date_format) - timeZoneOffset + msec
+    @classmethod
+    def normalize_business_day_cutoff(cls, cutoff):
+        if cutoff is None:
+            return datetime.time(0, 0)
+        if isinstance(cutoff, datetime.datetime):
+            return cutoff.time()
+        if isinstance(cutoff, datetime.time):
+            return cutoff
+        if isinstance(cutoff, six.string_types):
+            value = cutoff.strip()
+            for fmt in ('%H:%M:%S', '%H:%M'):
+                try:
+                    return datetime.datetime.strptime(value, fmt).time()
+                except ValueError:
+                    pass
+            raise ValueError("Invalid business day cutoff: %r" % (cutoff,))
+        if isinstance(cutoff, datetime.timedelta):
+            return (datetime.datetime.min + cutoff).time()
+        if isinstance(cutoff, (int, float)):
+            hours = int(cutoff)
+            minutes = int(round((cutoff - hours) * 60))
+            return datetime.time(hours, minutes)
+        raise TypeError("Invalid business day cutoff: %r" % (cutoff,))
 
     @classmethod
     def parseAcctinfors(cls, acctinfors_ofx, ofx):
@@ -739,8 +1490,10 @@ class OfxParser(object):
         for transaction_ofx in invstmtrs_ofx.findAll('invbanktran'):
             for stmt_ofx in transaction_ofx.findAll('stmttrn'):
                 try:
-                    statement.transactions.append(
-                        cls.parseTransaction(stmt_ofx))
+                    transaction = cls.parseTransaction(stmt_ofx)
+                    transaction.business_day_cutoff = getattr(
+                        cls, 'business_day_cutoff', datetime.time(0, 0))
+                    statement.transactions.append(transaction)
                 except OfxParserException:
                     ofxError = sys.exc_info()[1]
                     statement.discarded_entries.append(
@@ -781,6 +1534,8 @@ class OfxParser(object):
                         brokerage_balance.value = cls.toDecimal(value_ofx)
                     statement.balance_list.append(brokerage_balance)
 
+        statement.business_day_cutoff = getattr(
+            cls, 'business_day_cutoff', datetime.time(0, 0))
         return statement
 
     @classmethod
@@ -948,8 +1703,10 @@ class OfxParser(object):
 
         for transaction_ofx in stmt_ofx.findAll('stmttrn'):
             try:
-                statement.transactions.append(
-                    cls.parseTransaction(transaction_ofx))
+                transaction = cls.parseTransaction(transaction_ofx)
+                transaction.business_day_cutoff = getattr(
+                    cls, 'business_day_cutoff', datetime.time(0, 0))
+                statement.transactions.append(transaction)
             except OfxParserException:
                 ofxError = sys.exc_info()[1]
                 statement.discarded_entries.append(
@@ -957,6 +1714,8 @@ class OfxParser(object):
                 if cls.fail_fast:
                     raise
 
+        statement.business_day_cutoff = getattr(
+            cls, 'business_day_cutoff', datetime.time(0, 0))
         return statement
 
     @classmethod
@@ -1020,8 +1779,11 @@ class OfxParser(object):
         date_tag = txn_ofx.find('dtposted')
         if hasattr(date_tag, "contents"):
             try:
-                transaction.date = cls.parseOfxDateTime(
-                    date_tag.contents[0].strip())
+                raw_date = date_tag.contents[0].strip()
+                transaction.dtposted = cls.parseOfxDate(
+                    raw_date, getattr(cls, 'custom_date_format', None))
+                transaction.business_day_cutoff = getattr(
+                    cls, 'business_day_cutoff', datetime.time(0, 0))
             except IndexError:
                 raise OfxParserException("Invalid Transaction Date")
             except ValueError:

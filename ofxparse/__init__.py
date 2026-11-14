@@ -1,7 +1,9 @@
 from __future__ import absolute_import
 
 from .ofxparse import (OfxParser, OfxParserException, AccountType, Account,
-                       Statement, Transaction)
+                       Statement, Transaction, OfxDate, OFXDate,
+                       PostedDate, sort_transactions_by_utc,
+                       utc_sort_key)
 from .ofxprinter import OfxPrinter
 
 __version__ = '0.21'
@@ -12,5 +14,10 @@ __all__ = [
     'Account',
     'Statement',
     'Transaction',
+    'OfxDate',
+    'OFXDate',
+    'PostedDate',
+    'sort_transactions_by_utc',
+    'utc_sort_key',
     'OfxPrinter'
 ]

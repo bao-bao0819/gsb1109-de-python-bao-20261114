@@ -48,13 +48,20 @@ class OfxPrinter():
             strdt_msec = strdt_msec[:msec_digs]
         return strdt + '.' + strdt_msec
 
+    def printPostedDate(self, trn):
+        """Return ``DTPOSTED`` without losing precision or reported offset."""
+        raw = getattr(trn, 'raw_date', None)
+        if raw:
+            return raw
+        return self.printDate(trn.date)
+
     def writeTrn(self, trn, tabs=5):
         self.writeLine("<STMTTRN>", tabs=tabs)
         tabs += 1
 
         self.writeLine("<TRNTYPE>{}".format(trn.type.upper()), tabs=tabs)
         self.writeLine("<DTPOSTED>{}".format(
-            self.printDate(trn.date)
+            self.printPostedDate(trn)
         ), tabs=tabs)
         self.writeLine("<TRNAMT>{0:.2f}".format(float(trn.amount)), tabs=tabs)
 
