@@ -34,7 +34,7 @@ setup(
     maintainer_email="ray.maintainer@gmail.com",
     url="https://github.com/jazzband/geojson",
     long_description=readme_text,
-    packages=["geojson"],
+    packages=["geojson", "riverflow"],
     package_dir={"geojson": "geojson"},
     package_data={"geojson": ["*.rst"]},
     install_requires=[],
