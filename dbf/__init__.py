@@ -76,6 +76,9 @@ from .data_types import Char, Date, DateTime, Time, Logical, Quantum, Null
 from .data_types import NullDate, NullDateTime, NullTime, NullType, NoneType
 from .data_types import Vapor, Period, On, Off, Other, Truth, Falsth, Unknown
 from .pql import pqlc
+from .temporal import temporal_join, join_by_date, effective_join, versioned_join
+from .temporal import describe_results, Provenance, TemporalJoinRecord
+from .temporal import MATCHED, OVERLAP, MASTER_DELETED, MISSING, NO_VERSION, STATUSES
 
 from .tables import Table, Record, List, Index, Relation, Iter, IndexLocation
 from .tables import CodePage, FieldnameList, RecordTemplate
@@ -86,6 +89,9 @@ api = fake_module('api',
     'Table', 'Record', 'List', 'Index', 'Relation', 'Iter', 'Null', 'Char', 'Date', 'DateTime', 'Time',
     'Logical', 'Quantum', 'CodePage', 'create_template', 'delete', 'field_names', 'gather', 'is_deleted',
     'recno', 'source_table', 'reset', 'scatter', 'scan', 'undelete', 'write', 'export', 'pqlc', 'from_csv',
+    'temporal_join', 'join_by_date', 'effective_join', 'versioned_join',
+    'describe_results', 'Provenance', 'TemporalJoinRecord',
+    'MATCHED', 'OVERLAP', 'MASTER_DELETED', 'MISSING', 'NO_VERSION', 'STATUSES',
     'NullDate', 'NullDateTime', 'NullTime', 'NoneType', 'NullType', 'Decimal', 'Vapor', 'Period',
     'Truth', 'Falsth', 'Unknown', 'On', 'Off', 'Other', 'table_type',
     'DbfError', 'DataOverflowError', 'BadDataError', 'FieldMissingError',
@@ -111,6 +117,9 @@ __all__ = (
         'NullDate', 'NullDateTime', 'NullTime', 'NullType', 'NoneType',
         'Vapor', 'Period', 'On', 'Off', 'Other', 'Truth', 'Falsth', 'Unknown',
         'pqlc',
+        'temporal_join', 'join_by_date', 'effective_join', 'versioned_join',
+        'describe_results', 'Provenance', 'TemporalJoinRecord',
+        'MATCHED', 'OVERLAP', 'MASTER_DELETED', 'MISSING', 'NO_VERSION', 'STATUSES',
         'Table', 'Record', 'List', 'Index', 'Relation', 'Iter', 'IndexLocation',
         'CodePage', 'FieldnameList', 'RecordTemplate',
         'Db3Table', 'ClpTable', 'FpTable', 'VfpTable',

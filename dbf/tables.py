@@ -4104,6 +4104,21 @@ class Table(_Navigation):
             raise DbfError('%s is closed' % meta.filename)
         return pqlc(self, criteria)
 
+    def temporal_join(self, master, transaction_key, master_key,
+                      transaction_date, effective, expires, master_fields=None,
+                      validate='report'):
+        """
+        joins this table's records to date-effective master versions
+
+        see dbf.temporal.temporal_join for full parameter documentation
+        """
+        from .temporal import temporal_join
+        return temporal_join(
+                self, master, transaction_key, master_key, transaction_date,
+                effective, expires, master_fields=master_fields,
+                validate=validate,
+                )
+
     def reindex(self):
         """
         reprocess all indices for this table

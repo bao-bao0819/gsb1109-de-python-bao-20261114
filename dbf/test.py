@@ -5544,6 +5544,160 @@ class TestMisc(TestCase):
         dbf.Table(self.table_wierd.filename)
 
 
+class TestTemporalJoin(TestCase):
+    "date-effective transaction/master joins"
+
+    def setUp(self):
+        self.txn = Table(
+                os.path.join(tempdir, 'txn'),
+                'WH C(4); ITEM C(6); TXNDATE D; QTY N(6,0)',
+                dbf_type='db3',
+                overwrite=True,
+                )
+        self.master = Table(
+                os.path.join(tempdir, 'master'),
+                'WH C(4); ITEM C(6); NAME C(12); EFF D; EXP D',
+                dbf_type='db3',
+                overwrite=True,
+                )
+        self.txn.open(READ_WRITE)
+        self.master.open(READ_WRITE)
+
+    def tearDown(self):
+        self.txn.close()
+        self.master.close()
+
+    def join(self, **kwds):
+        return dbf.temporal_join(
+                self.txn, self.master,
+                ('WH', 'ITEM'), ('WH', 'ITEM'), 'TXNDATE', 'EFF', 'EXP',
+                **kwds
+                )
+
+    def test_half_open_boundary_and_shuffle(self):
+        "old version expires when new version starts; shuffled master is harmless"
+        self.master.append(('A', '1', 'NEW', Date(2024, 2, 1), Date(2024, 3, 1)))
+        self.master.append(('A', '1', 'OLD', Date(2024, 1, 1), Date(2024, 2, 1)))
+        self.txn.append(('A', '1', Date(2024, 1, 31), 5))
+        self.txn.append(('A', '1', Date(2024, 2, 1), 7))
+        result = self.join()
+        self.assertEqual(len(result), len(self.txn))
+        self.assertEqual([r.status for r in result], [MATCHED, MATCHED])
+        self.assertEqual([r['NAME'] for r in result], ['OLD', 'NEW'])
+        self.assertEqual(sum(row.QTY for row in result), 12)
+        self.assertEqual(result[0].effective, datetime.date(2024, 1, 1))
+        self.assertEqual(result[0].expires, datetime.date(2024, 2, 1))
+        self.assertEqual(result[1].effective, datetime.date(2024, 2, 1))
+
+    def test_warehouse_is_part_of_key(self):
+        "the same item in a different warehouse does not match"
+        self.master.append(('A', '1', 'A-ITEM', Date(2024, 1, 1), None))
+        self.master.append(('B', '1', 'B-ITEM', Date(2024, 1, 1), None))
+        self.txn.append(('B', '1', Date(2024, 6, 1), 1))
+        result = self.join()
+        self.assertEqual(result[0].master['NAME'].rstrip(), 'B-ITEM')
+        self.assertEqual(result[0].master_source.record_number, 1)
+
+    def test_different_key_field_names(self):
+        "transaction and master keys may use different field names"
+        master = Table(
+                os.path.join(tempdir, 'master_different_names'),
+                'WAREHOUSE C(4); ITEMNO C(6); NAME C(12); EFF D; EXP D',
+                dbf_type='db3',
+                overwrite=True,
+                )
+        master.open(READ_WRITE)
+        try:
+            master.append(('A', '1', 'HIT', Date(2024, 1, 1), None))
+            self.txn.append(('A', '1', Date(2024, 6, 1), 1))
+            result = dbf.temporal_join(
+                    self.txn, master,
+                    ('WH', 'ITEM'), ('WAREHOUSE', 'ITEMNO'),
+                    'TXNDATE', 'EFF', 'EXP',
+                    )
+            self.assertEqual(result[0].status, MATCHED)
+            self.assertEqual(result[0]['NAME'], 'HIT')
+        finally:
+            master.close()
+
+    def test_overlap_is_reported(self):
+        self.master.append(('A', '1', 'ONE', Date(2024, 1, 1), Date(2024, 3, 1)))
+        self.master.append(('A', '1', 'TWO', Date(2024, 2, 1), Date(2024, 4, 1)))
+        self.txn.append(('A', '1', Date(2024, 2, 15), 3))
+        result = self.join()
+        self.assertEqual(result[0].status, OVERLAP)
+        self.assertIsNone(result[0].master)
+        self.assertEqual(len(result[0].master_sources), 2)
+        self.assertEqual(
+                [source.record_number for source in result[0].master_sources],
+                [0, 1],
+                )
+        self.assertRaises(DbfError, self.join, validate='error')
+
+    def test_deleted_master_is_not_a_version(self):
+        self.master.append(('A', '1', 'GONE', Date(2024, 1, 1), None))
+        delete(self.master[0])
+        self.txn.append(('A', '1', Date(2024, 6, 1), 3))
+        result = self.join()
+        self.assertEqual(result[0].status, MASTER_DELETED)
+        self.assertTrue(dbf.is_deleted(result[0].master))
+        self.assertEqual(result[0].master_source.record_number, 0)
+
+    def test_missing_master(self):
+        self.txn.append(('Z', '9', Date(2024, 6, 1), 3))
+        result = self.join()
+        self.assertEqual(result[0].status, MISSING)
+        self.assertIsNone(result[0].master)
+        self.assertIsNone(result[0].master_source)
+        self.assertIsNotNone(result[0].transaction_source)
+        self.assertIn('NAME', result[0])
+        self.assertIsNone(result[0]['NAME'])
+
+    def test_gap_between_versions(self):
+        self.master.append(('A', '1', 'OLD', Date(2024, 1, 1), Date(2024, 2, 1)))
+        self.master.append(('A', '1', 'NEW', Date(2024, 3, 1), None))
+        self.txn.append(('A', '1', Date(2024, 2, 15), 3))
+        result = self.join()
+        self.assertEqual(result[0].status, NO_VERSION)
+
+    def test_provenance_points_at_originals(self):
+        self.master.append(('A', '1', 'OLD', Date(2024, 1, 1), None))
+        self.txn.append(('A', '1', Date(2024, 6, 1), 3))
+        result = self.join()
+        self.assertIs(result[0].transaction, self.txn[0])
+        self.assertIs(result[0].master, self.master[0])
+        self.assertIs(result[0].transaction_source.table, self.txn)
+        self.assertIs(result[0].master_source.table, self.master)
+        self.assertEqual(result[0].transaction_source.record_number, recno(self.txn[0]))
+        self.assertEqual(result[0].master_source.record_number, recno(self.master[0]))
+
+    def test_expiry_is_exclusive(self):
+        "a transaction on the expiry date does not use the expiring version"
+        self.master.append(('A', '1', 'OLD', Date(2024, 1, 1), Date(2024, 2, 1)))
+        self.txn.append(('A', '1', Date(2024, 2, 1), 3))
+        result = self.join()
+        self.assertEqual(result[0].status, NO_VERSION)
+        self.assertIsNone(result[0].master)
+
+    def test_duplicate_master_rows_do_not_fan_out(self):
+        "identical duplicate master rows are an overlap, not two sales"
+        self.master.append(('A', '1', 'ONE', Date(2024, 1, 1), None))
+        self.master.append(('A', '1', 'ONE', Date(2024, 1, 1), None))
+        self.txn.append(('A', '1', Date(2024, 6, 1), 3))
+        result = self.join()
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].status, OVERLAP)
+        self.assertEqual(len(result[0].master_sources), 2)
+        self.assertEqual(sum(row.QTY for row in result), 3)
+
+    def test_master_fields_can_be_renamed(self):
+        self.master.append(('A', '1', 'OLD', Date(2024, 1, 1), None))
+        self.txn.append(('A', '1', Date(2024, 6, 1), 3))
+        result = self.join(master_fields={'NAME': 'DESCRIPTION'})
+        self.assertEqual(result[0]['DESCRIPTION'], 'OLD')
+        self.assertEqual(result[0]['NAME'] if 'NAME' in result[0] else 'absent', 'absent')
+
+
 class TestWhatever(TestCase):
     "move tests here to run one at a time while debugging"
 

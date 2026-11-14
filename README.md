@@ -146,3 +146,28 @@ Creating/writing a DBF:
             print('--------')
 
     table.close()
+
+Joining transactions to date-effective master data:
+
+    # master has warehouse + item + description, with several versions;
+    # effective ranges are half-open: [effective, expires)
+    results = transactions.temporal_join(
+            master,
+            transaction_key=('WH', 'ITEM'),
+            master_key=('WH', 'ITEM'),
+            transaction_date='TXNDATE',
+            effective='EFF',
+            expires='EXP',
+            )
+    for row in results:
+        print(row.status)                   # matched, overlap, missing, ...
+        print(row.NAME)                     # from the effective master version
+        print(row.transaction_source)       # (table, record, name, record number)
+        print(row.master_source)            # None when no master version matched
+
+`dbf.temporal_join(...)` is the functional equivalent.  Every transaction
+produces exactly one result, so duplicate or unordered master rows cannot
+multiply sales.  The result status distinguishes `matched`, `overlap`,
+`master-deleted`, `missing` (no master key at all), and `no-version` (key
+exists but no version covers the transaction date).  Pass
+`validate='error'` to raise on overlapping versions instead.

@@ -2,6 +2,15 @@ What's New
 ==========
 
 
+0.99.002
+--------
+
+Add date-effective joins (`dbf.temporal_join` / `Table.temporal_join`).
+Effective ranges use half-open `[effective, expires)` semantics, results
+report `matched`, `overlap`, `master-deleted`, `missing`, or `no-version`,
+and both source records are kept as provenance.
+
+
 0.99.001
 --------
 
