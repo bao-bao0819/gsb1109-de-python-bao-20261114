@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
 from re import Match
-from typing import Callable, List, Literal, Optional, Tuple, Union
+from typing import Callable, Dict, List, Literal, Optional, Tuple, Union
 
 from metar.Datatypes import (
     direction,
@@ -15,6 +15,12 @@ def xlate_loc(loc: str) -> str: ...
 def _sanitize(code: str) -> str: ...
 def _report_match(handler: Callable[[dict], None], match: Match) -> None: ...
 def _unparsedGroup(self: "Metar", d: dict) -> None: ...
+def crosswind_bounds(
+    wind_directions: Tuple[float, float],
+    speed: float,
+    runway_heading: float,
+    magnetic_variation: float = ...,
+) -> Tuple[float, float]: ...
 
 class ParserError(Exception): ...
 
@@ -120,6 +126,13 @@ class Metar:
         self,
         units: Literal["KT", "MPS", "KMH", "MPH", "kt", "mps", "kmh", "mph"] = ...,
     ) -> str: ...
+    def wind_crosswind(
+        self,
+        runway_heading: float,
+        magnetic_variation: float = ...,
+        units: Literal["KT", "MPS", "KMH", "MPH", "kt", "mps", "kmh", "mph"] = ...,
+        include_gust: bool = ...,
+    ) -> Dict[str, object]: ...
     def peak_wind(
         self,
         units: Literal["KT", "MPS", "KMH", "MPH", "kt", "mps", "kmh", "mph"] = ...,

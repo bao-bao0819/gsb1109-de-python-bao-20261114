@@ -106,6 +106,21 @@ tendency, or `None` when no unambiguous tendency was reported. These describe
 the reported past tendency; no trend is inferred from the range values.
 `obs.runway_visual_range()` includes the tendency when available.
 
+`obs.wind_crosswind(runway_heading, magnetic_variation=0.0)` returns the
+attainable signed crosswind components for a runway given its true bearing
+and the east-positive magnetic variation that aligns the (normally magnetic)
+wind directions with that bearing. The component is positive for wind from
+the runway's right and negative from its left. The returned dict holds a
+`(minimum, maximum)` envelope for the sustained wind under `mean` and, when
+gusts are reported, a separate envelope under `gust` over the same direction
+sector. Sectors that cross north (e.g. `350V020`) are handled continuously,
+extrema inside a sector are included alongside its endpoints, and `VRB` (or
+an unknown direction) spans the full compass. Calm reports and reports with
+missing speeds yield `None` envelopes rather than zero-filled ones, and are
+distinguished by the `calm` and `variable_direction` flags. The standalone
+`metar.Metar.crosswind_bounds((lower, upper), speed, runway_heading, ...)`
+computes the same envelope for an explicit direction sector.
+
 See the sample.py script for an annonated demonstration of the use
 of this code.  Just as an appetizer, here's an interactive example...
 

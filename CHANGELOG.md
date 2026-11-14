@@ -1,6 +1,16 @@
 Change Log
 ==========
 
+metar-2.0.3 (unreleased)
+
+- Add `Metar.wind_crosswind()` and the standalone `crosswind_bounds()` helper
+  to compute the attainable signed crosswind components for a runway over a
+  wind direction sector, including sectors that cross north and extrema
+  inside the sector. Separate envelopes are returned for the sustained wind
+  and for gusts; fully variable (VRB) and unknown directions span the full
+  compass, while calm and missing-speed reports are kept distinct and never
+  zero-filled.
+
 metar-2.0.2 (26 October 2026)
 
 - Infer a month when METAR day is ambiguous and day of the month does not

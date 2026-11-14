@@ -10,6 +10,7 @@ import calendar
 import datetime
 import warnings
 import logging
+from math import radians, sin
 
 from metar import __version__, __author__, __email__, __LICENSE__
 from metar.Datatypes import (
@@ -344,6 +345,73 @@ def _unparsedGroup(self, d):
     Handle otherwise unparseable main-body groups.
     """
     self._unparsed_groups.append(d["group"])
+
+
+def _crosswind_component(
+    wind_direction, speed, runway_heading, magnetic_variation=0.0
+):
+    """Return the signed crosswind component for a single wind direction.
+
+    The component is ``speed * sin(wind_direction - runway_heading)`` after
+    the two directions have been brought onto the same reference frame. A
+    positive value means the wind blows from the right of the runway and a
+    negative value from the left. ``runway_heading`` is the runway true
+    bearing and ``magnetic_variation`` is the (east-positive) offset that
+    converts the reported, magnetic wind directions to true.
+    """
+    angle = radians(
+        wind_direction + magnetic_variation - runway_heading
+    )
+    return speed * sin(angle)
+
+
+def crosswind_bounds(
+    wind_directions, speed, runway_heading, magnetic_variation=0.0
+):
+    """
+    Return the (minimum, maximum) signed crosswind components attainable
+    while the wind direction varies within a sector and the speed stays fixed.
+
+    Parameters
+    ----------
+    wind_directions : tuple of two floats
+        The clockwise wind-direction sector, in the directions' own reference
+        frame, as (lower, upper) degrees. A sector that crosses north is given
+        with the lower end unwrapped, e.g. (350.0, 380.0) for 350 to 020; the
+        full 0..360 compass may be passed as (0.0, 360.0).
+    speed : float
+        The (non-negative) wind speed.
+    runway_heading : float
+        The runway true bearing, in degrees.
+    magnetic_variation : float, optional
+        East-positive offset, in degrees, converting the reported wind
+        directions to the true reference used by the runway bearing. Defaults
+        to zero, i.e. both inputs already share the same reference.
+
+    Returns
+    -------
+    tuple of two floats
+        The (minimum, maximum) crosswind components, in the speed units of
+        the input. Positive values denote wind from the right of the runway,
+        negative values wind from the left.
+    """
+    lower, upper = wind_directions
+    relative_heading = runway_heading - magnetic_variation
+    candidate_directions = [lower, upper]
+    # The sine extrema lie 90 and 270 degrees clockwise of the runway
+    # heading; test each extremum and its whole-circle neighbours so a
+    # full-circle (or north-crossing) sector still contains them.
+    for extremum in (relative_heading + 90.0, relative_heading + 270.0):
+        for direction in (extremum - 360.0, extremum, extremum + 360.0):
+            if lower <= direction <= upper:
+                candidate_directions.append(direction)
+    components = [
+        _crosswind_component(
+            wind_direction, speed, runway_heading, magnetic_variation
+        )
+        for wind_direction in candidate_directions
+    ]
+    return min(components), max(components)
 
 
 # METAR report objects
@@ -1218,6 +1286,90 @@ class Metar(object):
             if self.wind_gust:
                 text += ", gusting to %s" % self.wind_gust.string(units)
         return text
+
+    def wind_crosswind(
+        self,
+        runway_heading,
+        magnetic_variation=0.0,
+        units="KT",
+        include_gust=True,
+    ):
+        """
+        Return the attainable signed crosswind components for a runway.
+
+        The runway true bearing and the east-positive magnetic variation are
+        provided so that the magnetic wind directions can be compared with
+        the true runway bearing; pass zero variation when both already share
+        the same reference. Crosswind is positive when the wind comes from
+        the runway's right and negative when it comes from its left.
+
+        Parameters
+        ----------
+        runway_heading : float
+            The runway true bearing, in degrees.
+        magnetic_variation : float, optional
+            East-positive magnetic variation, in degrees, added to the
+            reported wind directions. Defaults to zero.
+        units : str, optional
+            Speed units for the returned components. Defaults to "KT".
+        include_gust : bool, optional
+            When True (the default), a separate envelope is computed for the
+            reported gust speed over the same direction sector.
+
+        Returns
+        -------
+        dict
+            Keys:
+            ``mean``
+                (minimum, maximum) crosswind for the sustained wind, or None
+                when the sustained speed is missing or the wind is calm.
+            ``gust``
+                (minimum, maximum) crosswind for the gusts, evaluated over
+                the same direction sector at the gust speed, or None when no
+                gust speed is reported.
+            ``variable_direction``
+                True when the direction is completely variable (VRB) or
+                unknown, so every direction around the compass is possible.
+            ``calm``
+                True when the reported sustained speed is zero.
+            Missing speeds are never substituted with zero.
+        """
+        result = {
+            "mean": None,
+            "gust": None,
+            "variable_direction": False,
+            "calm": False,
+        }
+        if self.wind_speed is None:
+            result["variable_direction"] = self.wind_dir is None
+            return result
+        if self.wind_speed.value() == 0.0:
+            result["calm"] = True
+            result["variable_direction"] = self.wind_dir is None
+            return result
+
+        if self.wind_dir_from is not None:
+            lower = self.wind_dir_from.value()
+            upper = self.wind_dir_to.value()
+            if upper < lower:
+                upper += 360.0
+        elif self.wind_dir is None:
+            result["variable_direction"] = True
+            lower, upper = 0.0, 360.0
+        else:
+            lower = upper = self.wind_dir.value()
+
+        mean_speed = self.wind_speed.value(units)
+        result["mean"] = crosswind_bounds(
+            (lower, upper), mean_speed, runway_heading, magnetic_variation
+        )
+
+        if include_gust and self.wind_gust is not None:
+            gust_speed = self.wind_gust.value(units)
+            result["gust"] = crosswind_bounds(
+                (lower, upper), gust_speed, runway_heading, magnetic_variation
+            )
+        return result
 
     def peak_wind(self, units="KT"):
         """
