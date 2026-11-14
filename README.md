@@ -155,3 +155,45 @@ environments. To run tests against all environments, install tox and run:
 To run against a specific environment, use the `-e` flag:
 
     >>> tox -e py310
+
+Archived observations
+------------------------------------------------------------------------
+
+When reports arrive from more than one archive, the same station and
+observation minute can appear several times: once as the original report,
+again as a verbatim retransmission, and later as a correction. The
+`metar.Archive` module reconstructs what was visible at a given reception
+cutoff and records which correction replaced it.
+
+```python
+>>> from datetime import datetime, timezone
+>>> from metar.Archive import Archive
+>>> original = "METAR KEWR 121651Z 22015KT 10SM FEW020 19/13 A2992"
+>>> corrected = "METAR KEWR 121651Z COR 22015KT 10SM FEW020 19/14 A2992"
+>>> archive = Archive(month=11, year=2026)
+>>> archive.add(original, datetime(2026, 11, 12, 16, 52, tzinfo=timezone.utc),
+...             source="primary")
+>>> archive.add(corrected, datetime(2026, 11, 12, 16, 58, tzinfo=timezone.utc),
+...             source="primary")
+>>> seen = archive.lookup("KEWR", datetime(2026, 11, 12, 16, 51),
+...                       as_of=datetime(2026, 11, 12, 16, 53, tzinfo=timezone.utc))
+>>> seen.code
+'METAR KEWR 121651Z 22015KT 10SM FEW020 19/13 A2992'
+>>> seen.superseded_by.code
+'METAR KEWR 121651Z COR 22015KT 10SM FEW020 19/14 A2992'
+```
+
+`Archive.lookup(station, time, as_of=...)` selects the highest revision
+received by the cutoff. `Resolution.status` is `"observed"`, `"conflict"`, or
+`"missing"`. A conflict means two reports at the same revision level disagree
+and reception time is not evidence of issue order, so no winner is chosen;
+`Resolution.variants` lists the competing values. `Resolution.superseded_by`
+names the immediate later correction while `Resolution.final` names the last
+unambiguous one.
+
+Reports are identified by source and normalized text. Re-importing a file, or
+importing the two archives in either order, leaves the answers unchanged.
+
+If a feed supplies a trustworthy issue sequence, pass it as `sequence=` when
+adding reports. Sequence numbers order same-level corrections; without them
+(or with missing/duplicate values) such corrections stay a conflict.

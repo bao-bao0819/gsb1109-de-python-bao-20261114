@@ -25,7 +25,7 @@ dependencies = []
 packages = ["metar"]
 
 [tool.setuptools.package-data]
-metar =  ["nsd_cccc.txt", "py.typed", "*.pyi"]
+metar = ["nsd_cccc.txt", "py.typed", "*.pyi"]
 
 [tool.setuptools_scm]
 version_scheme = "post-release"

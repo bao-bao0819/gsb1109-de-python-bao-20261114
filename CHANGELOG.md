@@ -1,6 +1,14 @@
 Change Log
 ==========
 
+Unreleased
+----------
+
+- Add `metar.Archive` for reconstructing the METAR observation visible at a
+  given reception cutoff across one or more archives, finding the correction
+  that superseded it, and marking same-level disagreements as conflicts
+  instead of choosing by import order.
+
 metar-2.0.2 (26 October 2026)
 
 - Infer a month when METAR day is ambiguous and day of the month does not
