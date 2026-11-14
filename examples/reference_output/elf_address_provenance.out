@@ -1,0 +1,106 @@
+Processing file: ./examples/sample_exe64.elf
+{
+  "ranges": [
+    {
+      "start": "0x400000",
+      "end": "0x601030",
+      "records": [
+        {
+          "start": "0x400000",
+          "end": "0x4006c4",
+          "kind": "file",
+          "file_sources": [
+            {
+              "segment": 2,
+              "file_offset": "0x0",
+              "size": "0x6c4"
+            }
+          ],
+          "zero_fill_sources": []
+        },
+        {
+          "start": "0x4006c4",
+          "end": "0x600e18",
+          "kind": "unmapped",
+          "file_sources": [],
+          "zero_fill_sources": []
+        },
+        {
+          "start": "0x600e18",
+          "end": "0x60101c",
+          "kind": "file",
+          "file_sources": [
+            {
+              "segment": 3,
+              "file_offset": "0xe18",
+              "size": "0x204"
+            }
+          ],
+          "zero_fill_sources": []
+        },
+        {
+          "start": "0x60101c",
+          "end": "0x601030",
+          "kind": "zero_fill",
+          "file_sources": [],
+          "zero_fill_sources": [
+            {
+              "segment": 3,
+              "size": "0x14"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "start": "0x400000",
+      "end": "0x4006c4",
+      "records": [
+        {
+          "start": "0x400000",
+          "end": "0x4006c4",
+          "kind": "file",
+          "file_sources": [
+            {
+              "segment": 2,
+              "file_offset": "0x0",
+              "size": "0x6c4"
+            }
+          ],
+          "zero_fill_sources": []
+        }
+      ]
+    },
+    {
+      "start": "0x600e18",
+      "end": "0x601030",
+      "records": [
+        {
+          "start": "0x600e18",
+          "end": "0x60101c",
+          "kind": "file",
+          "file_sources": [
+            {
+              "segment": 3,
+              "file_offset": "0xe18",
+              "size": "0x204"
+            }
+          ],
+          "zero_fill_sources": []
+        },
+        {
+          "start": "0x60101c",
+          "end": "0x601030",
+          "kind": "zero_fill",
+          "file_sources": [],
+          "zero_fill_sources": [
+            {
+              "segment": 3,
+              "size": "0x14"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
