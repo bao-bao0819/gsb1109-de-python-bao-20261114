@@ -82,12 +82,17 @@ from .tables import CodePage, FieldnameList, RecordTemplate
 from .tables import Db3Table, ClpTable, FpTable, VfpTable
 from .tables import RecordVaporWare
 
+from ._audit import AuditRecord, CollisionGroup, StageResult, AuditReport
+from ._audit import audit_key, audit_unique_key, check_unique_key, find_key_collisions
+
 api = fake_module('api',
     'Table', 'Record', 'List', 'Index', 'Relation', 'Iter', 'Null', 'Char', 'Date', 'DateTime', 'Time',
     'Logical', 'Quantum', 'CodePage', 'create_template', 'delete', 'field_names', 'gather', 'is_deleted',
     'recno', 'source_table', 'reset', 'scatter', 'scan', 'undelete', 'write', 'export', 'pqlc', 'from_csv',
     'NullDate', 'NullDateTime', 'NullTime', 'NoneType', 'NullType', 'Decimal', 'Vapor', 'Period',
     'Truth', 'Falsth', 'Unknown', 'On', 'Off', 'Other', 'table_type',
+    'AuditRecord', 'CollisionGroup', 'StageResult', 'AuditReport',
+    'audit_key', 'audit_unique_key', 'check_unique_key', 'find_key_collisions',
     'DbfError', 'DataOverflowError', 'BadDataError', 'FieldMissingError',
     'FieldSpecError', 'NonUnicodeError', 'NotFoundError',
     'DbfWarning', 'Eof', 'Bof', 'DoNotIndex', 'FieldNameWarning', 'IndexLocation',
@@ -115,4 +120,6 @@ __all__ = (
         'CodePage', 'FieldnameList', 'RecordTemplate',
         'Db3Table', 'ClpTable', 'FpTable', 'VfpTable',
         'RecordVaporWare',
+        'AuditRecord', 'CollisionGroup', 'StageResult', 'AuditReport',
+        'audit_key', 'audit_unique_key', 'check_unique_key', 'find_key_collisions',
         )

@@ -7,6 +7,7 @@ import tempfile
 import shutil
 import stat
 import warnings
+from array import array
 from unittest import skipIf, skipUnless, TestCase as unittest_TestCase
 
 py_ver = sys.version_info[:2]
@@ -5487,6 +5488,167 @@ class TestReadWriteDefaultOpen(TestCase):
         table.open(READ_ONLY)
         table.close()
         self.assertRaises((IOError, OSError), table.open, READ_WRITE)
+
+
+class TestAuditKey(TestCase):
+    "uniqueness audit across raw, code-page, and case-fold rules"
+
+    def setUp(self):
+        self.tempdir = tempfile.mkdtemp()
+        self.filename = os.path.join(self.tempdir, 'audit_table')
+        table = Table(
+                self.filename,
+                'cust C(8); branch C(4)',
+                dbf_type='db3',
+                codepage='cp1252',
+                overwrite=True,
+                )
+        table.open(READ_WRITE)
+        with table:
+            for row in (
+                    ('001', 'A'),       # 0
+                    ('001', 'A'),       # 1 raw duplicate of 0
+                    ('001', 'a'),       # 2 folds into 0/1
+                    ('002', 'B'),       # 3
+                    ('002', 'b'),       # 4 folds into 3
+                    ):
+                table.append(row)
+        table.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.tempdir, True)
+
+    def _set_raw_field(self, recno, field, value):
+        "overwrite the stored bytes of one character field"
+        field = field.upper()
+        table = Table(self.filename)
+        table.open(READ_WRITE)
+        try:
+            record = table[recno]
+            start = table._meta[field][START]
+            length = table._meta[field][LENGTH]
+            payload = value + b' ' * (length - len(value))
+            record._start_flux()
+            record._data[start:start + length] = array('B', payload)
+            record._commit_flux()
+        finally:
+            table.close()
+
+    def test_stage_order_and_first_collision(self):
+        "raw-bytes stage fires before trim and fold"
+        report = dbf.audit_key(self.filename, ('cust', 'branch'))
+        self.assertTrue(report.stages[0].introduced)
+        self.assertEqual(report.first_collision_index, 1)
+        self.assertEqual(report.first_collision['stage'], 'raw_bytes')
+        self.assertEqual(report.stages[0].new_recnos, (0, 1))
+
+    def test_trim_and_fold_only_after_raw(self):
+        "when raw is clean, trim then fold introduce the collisions"
+        # make raw bytes unique again: give records 0 and 1 distinct fills
+        self._set_raw_field(0, 'cust', b'001')
+        self._set_raw_field(1, 'cust', b'001\x00\x00')
+        report = dbf.audit_key(self.filename, ('cust', 'branch'))
+        self.assertFalse(report.stages[0].has_collisions)
+        self.assertTrue(report.stages[1].introduced)
+        self.assertEqual(report.stages[1].new_recnos, (0, 1))
+        self.assertEqual(report.first_collision_index, 2)
+
+    def test_three_row_group_counts_only_new_row(self):
+        "two rows already collided; the third must be the only new conflict"
+        # raw clean, trim makes rows 0 and 1 collide, fold adds row 2
+        self._set_raw_field(0, 'cust', b'001')
+        self._set_raw_field(1, 'cust', b'001\x00\x00')
+        report = dbf.audit_key(self.filename, ('cust', 'branch'))
+        folded = report.stages[2]
+        group = [g for g in folded.groups if g.recnos == (0, 1, 2)][0]
+        self.assertEqual(group.new_recnos, (2, ))
+        self.assertEqual(group.recnos, (0, 1, 2))
+
+    def test_second_group_reports_both_rows(self):
+        "a group that was unique before this step reports every member as new"
+        report = dbf.audit_key(self.filename, ('cust', 'branch'))
+        group = [g for g in report.stages[2].groups if 3 in g.recnos][0]
+        self.assertEqual(group.recnos, (3, 4))
+        self.assertEqual(group.new_recnos, (3, 4))
+
+    def test_deleted_records_excluded_by_default(self):
+        "deleted records are skipped but physical recnos stay put"
+        table = Table(self.filename)
+        table.open(READ_WRITE)
+        try:
+            dbf.delete(table[0])
+        finally:
+            table.close()
+        report = dbf.audit_key(self.filename, ('cust', 'branch'))
+        self.assertEqual(report.deleted_count, 1)
+        self.assertEqual(report.record_count, 4)
+        self.assertNotIn(0, [recno for stage in report.stages for recno in stage.collision_recnos])
+
+    def test_deleted_records_included_keep_recnos(self):
+        "including deleted records preserves the original row numbers"
+        table = Table(self.filename)
+        table.open(READ_WRITE)
+        try:
+            dbf.delete(table[0])
+        finally:
+            table.close()
+        report = dbf.audit_key(self.filename, ('cust', 'branch'), include_deleted=True)
+        raw = report.stages[0]
+        self.assertEqual(raw.groups[0].recnos, (0, 1))
+        self.assertEqual(raw.groups[0].new_recnos, (0, 1))
+        self.assertTrue(raw.groups[0].records[0].deleted)
+
+    def test_custom_case_rule(self):
+        "a callable case rule is applied to decoded values"
+        report = dbf.audit_key(self.filename, ('cust', 'branch'), casefold=lambda value: value.upper())
+        self.assertEqual(report.casefold_name, '<lambda>')
+        self.assertTrue(report.stages[2].has_collisions)
+
+    def test_two_groups_merging_is_an_introduced_conflict(self):
+        "separate 2-row groups that merge get flagged even with no new row"
+        filename = os.path.join(self.tempdir, 'merge_table')
+        table = Table(
+                filename, 'cust C(8); branch C(4)',
+                dbf_type='db3', overwrite=True,
+                )
+        table.open(READ_WRITE)
+        with table:
+            for row in (
+                    ('AA', 'X'), ('AA', 'X'),
+                    ('AA', 'x'), ('AA', 'x'),
+                    ('BB', 'Y'), ('BB', 'y'),
+                    ):
+                table.append(row)
+        table.close()
+        # rows 2/3 differ from 0/1 only by NUL fill, so stage 2 keeps two
+        # separate groups and stage 3 merges them
+        for recno in (2, 3):
+            table = Table(filename)
+            table.open(READ_WRITE)
+            try:
+                record = table[recno]
+                start = table._meta['CUST'][START]
+                length = table._meta['CUST'][LENGTH]
+                record._start_flux()
+                record._data[start:start + length] = array('B', b'AA' + b'\x00' * (length - 2))
+                record._commit_flux()
+            finally:
+                table.close()
+        report = dbf.audit_key(filename, ('cust', 'branch'))
+        self.assertTrue(report.stages[0].has_collisions)
+        self.assertFalse(report.stages[1].introduces_conflict)
+        folded = report.stages[2]
+        merge = [group for group in folded.merged_groups if group.previous_groups == 2]
+        self.assertTrue(merge)
+        self.assertEqual(merge[0].new_recnos, ())
+        self.assertTrue(folded.introduces_conflict)
+
+    def test_json_shape(self):
+        "report is serialisable and exposes recnos/rows"
+        report = dbf.audit_key(self.filename, ('cust', 'branch')).as_dict()
+        self.assertEqual(report['fields'], ['CUST', 'BRANCH'])
+        self.assertEqual(report['first_collision']['stage'], 'raw_bytes')
+        self.assertEqual(report['stages'][0]['groups'][0]['recnos'], [0, 1])
 
 
 class TestDBC(TestCase):

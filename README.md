@@ -24,6 +24,16 @@ statement.
 
 Index -- nonpersistent index for a table.
 
+Key audit -- `dbf.audit_key()` tests a composite key against the same records
+using the bytes as stored, the table code page with trailing fill removed, and
+a business case-folding rule.  Each step reports collision groups with the
+physical record numbers, and rows that were already conflicting earlier are
+not reported again; only the row that first joins an existing group is new.
+
+    python -m dbf.audit customer.dbf --fields CUST_CODE BRANCH
+
+See `dbf/_audit.py` for `include_deleted`, custom case rules, and JSON output.
+
 Fields::
 
     dBase III (Null not supported)
