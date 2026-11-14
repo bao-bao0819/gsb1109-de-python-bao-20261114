@@ -370,6 +370,52 @@ map_geometries
   >>> geojson.dumps(new_point, sort_keys=True)
   '{"geometries": [{"coordinates": [[-115.81, 37.24]], "type": "MultiPoint"}], "type": "GeometryCollection"}'
 
+apportion
+~~~~~~~~~
+
+:code:`geojson.apportion` splits per-segment emission totals across mileage
+bins. Mileage readings are attached to the line, one per vertex, and emissions
+are attached per segment. A segment contributes to each bin in proportion to
+the distance actually travelled inside that bin; reversing and backtracking
+therefore add distance to every bin the line passes through, in both
+directions.
+
+.. code:: python
+
+  >>> import geojson
+
+  >>> line = geojson.LineString([(0, 0), (0, 10), (0, 0)],
+  ...                           mileage=[0, 10, 0],
+  ...                           emissions=[7, 7])
+
+  >>> geojson.apportion(line, bin_width=5)["bins"]
+  {0: 7, 1: 7}
+
+A zero-length segment whose mileage lands exactly on a bin edge is a stop. It
+has no distance to split, so it is reported separately instead of being pushed
+into either neighbouring bin.
+
+.. code:: python
+
+  >>> line = geojson.LineString([(0, 0), (0, 5), (0, 5), (0, 10)],
+  ...                           mileage=[0, 5, 5, 10],
+  ...                           emissions=[3, 4, 3])
+
+  >>> result = geojson.apportion(line, bin_width=5)
+  >>> result["bins"]
+  {0: 3, 1: 3}
+  >>> result["stops"]
+  [{'mileage': 5, 'units': 4, 'left_bin': 0, 'right_bin': 1, 'segment': 1}]
+
+Units are delivered as integers with the largest remainder method. The
+remainder is computed once for the whole batch, not once per segment, so the
+sum of every bin and stop always equals the original batch total even after a
+line folds back on itself. Equal remainders are settled in ascending mileage
+order; a stop sits between its two neighbouring bins, so a stop at an interior
+edge wins a tie against the bin above it and loses one against the bin below.
+:code:`geojson.apportion_mileage` provides the same allocation without a
+geometry, and explicit bin edges can be supplied with :code:`boundaries`.
+
 validation
 ~~~~~~~~~~
 
