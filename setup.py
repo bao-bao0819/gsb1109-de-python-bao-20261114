@@ -30,6 +30,7 @@ if platform.system() in ('Linux','Unix'):
            'odf2xhtml/odf2xhtml.1',
            'odf2mht/odf2mht.1',
            'odf2xml/odf2xml.1',
+           'odffieldaudit/odffieldaudit.1',
            'odfimgimport/odfimgimport.1',
            'odflint/odflint.1',
            'odfmeta/odfmeta.1',
@@ -90,6 +91,7 @@ In addition to the API, there are a few scripts:
 - odf2xhtml - Convert ODF to (X)HTML
 - odf2mht - Convert ODF to HTML archive
 - odf2xml - Create OpenDocument XML file from OD? package
+- odffieldaudit - Audit user-field declarations, references and cached display text
 - odfimgimport - Import external images
 - odflint - Check ODF file for problems
 - odfmeta - List or change the metadata of an ODF file
@@ -113,6 +115,7 @@ The code at https://joinup.ec.europa.eu/software/odfpy/home is obsolete."""
           'odf2xhtml/odf2xhtml',
           'odf2mht/odf2mht',
           'odf2xml/odf2xml',
+          'odffieldaudit/odffieldaudit',
           'odfimgimport/odfimgimport',
           'odflint/odflint',
           'odfmeta/odfmeta',

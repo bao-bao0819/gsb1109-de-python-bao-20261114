@@ -1,0 +1,70 @@
+.TH "ODFFIELDAUDIT" "1" "2026-11-14" "odfpy" "User commands"
+.SH NAME
+odffieldaudit \- audit user-field declarations, references and cached display text in an ODF file
+.SH SYNOPSIS
+.B odffieldaudit
+.RB [ \-f
+.IR field ]...
+.RB [ \-j ]
+.RB [ \-\-json ]
+.RB [ \-\-only-issues ]
+.IR path " ..."
+.SH DESCRIPTION
+.B odffieldaudit
+reports where a user field is really used in an OpenDocument package.
+Only genuine field references
+.RI ( text:user-field-get
+and
+.IR text:user-field-input )
+are reported; ordinary body text that merely spells the same value is
+not a reference and is never listed.
+.PP
+For every field the program shows its declarations
+.RI ( text:user-field-decl )
+with the declared value type and value, and every reference together
+with the display text cached inside the reference element. Office
+applications only refresh that cached text when fields are updated, so
+a string field whose cached text differs from its declared value is
+flagged as stale. For non-string fields (numbers, dates, booleans) a
+difference is reported as display-differs, because it may simply result
+from number or date formatting.
+.PP
+References whose name has no matching declaration in the same document
+scope are listed as undeclared references. Each embedded object (the
+Object N folders, including nested objects) is an independent document,
+so a field inside an object is resolved against that object's own
+declarations only, never against the host document.
+.PP
+Every reported occurrence carries a location of the form
+.IR part : line : column
+that points at the opening tag of the element, for example
+.IR styles.xml:11:11
+for a field used in a page header.
+.SH OPTIONS
+.TP
+.BI \-f " field"
+Restrict the audit to the named user field. May be given more than once.
+By default all user fields are audited.
+.TP
+.B \-j
+.TQ
+.B \-\-json
+Emit machine readable JSON instead of the human readable text report.
+.TP
+.B \-\-only-issues
+Only list undeclared references and references whose cached display text
+differs from the declared value.
+.SH EXIT STATUS
+The program exits with status 1 when at least one undeclared reference
+or stale string field was found, and 0 otherwise. Non-string
+display-differs findings do not change the exit status on their own.
+.SH EXAMPLE
+.PP
+.nf
+.RS
+odffieldaudit \-f 批号 document.odt
+odffieldaudit \-\-json \-\-only-issues document.odt
+.RE
+.fi
+.SH SEE ALSO
+.BR odfuserfield (1)

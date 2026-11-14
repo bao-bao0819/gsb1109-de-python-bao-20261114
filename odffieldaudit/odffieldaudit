@@ -1,0 +1,197 @@
+#!/usr/bin/python3
+# -*- coding: utf-8 -*-
+"""Audit user-field declarations, references and cached display text
+in one or more OpenDocument packages.
+
+Only genuine field references (text:user-field-get /
+text:user-field-input) are reported: plain paragraphs that merely spell
+the same value are not references.  Embedded objects are audited as
+independent documents, so their fields are resolved against their own
+declarations.
+"""
+
+import getopt
+import json
+import sys
+import xml.sax
+import zipfile
+
+from defusedxml.common import DefusedXmlException
+
+from odf.userfieldaudit import audit_package, scope_label
+
+if sys.version_info[0] == 3:
+    unicode = str
+
+field_filters = []
+use_json = False
+only_issues = False
+
+
+def exitwithusage(exitcode=2):
+    sys.stderr.write(
+        u"Usage: %s [-f field]... [-j] [--only-issues] "
+        u"inputfile [inputfile ...]\n" % sys.argv[0])
+    sys.stderr.write(
+        u"\t-f field\trestrict the audit to this user field "
+        u"(repeatable)\n")
+    sys.stderr.write(
+        u"\t-j, --json\temit machine readable JSON instead of the "
+        u"text report\n")
+    sys.stderr.write(
+        u"\t--only-issues\tonly list undeclared references and stale "
+        u"display text\n")
+    sys.stderr.write(u"\tInputfiles must be OpenDocument packages\n")
+    sys.exit(exitcode)
+
+
+try:
+    opts, args = getopt.getopt(
+        sys.argv[1:], u"f:j", [u"json", u"only-issues"])
+except getopt.GetoptError:
+    exitwithusage()
+
+for option, value in opts:
+    if option == u'-f':
+        field_filters.append(unicode(value))
+    elif option in (u'-j', u'--json'):
+        use_json = True
+    elif option == u'--only-issues':
+        only_issues = True
+
+if not args:
+    exitwithusage()
+inputfiles = [unicode(arg) for arg in args]
+
+ISSUE_STATUSES = (
+    u'undeclared', u'stale', u'display-differs', u'no-stored-value')
+
+
+def _location_line(reference):
+    return u"    [%s] %s %s at %s" % (
+        reference.scope or u'main',
+        reference.region,
+        reference.kind,
+        reference.location)
+
+
+def _write(text):
+    sys.stdout.write(text + u"\n")
+
+
+def _has_issue(reference):
+    return reference.status in ISSUE_STATUSES
+
+
+def render_text(result):
+    _write(u"User-field audit of %s" % result.source)
+
+    if not result.declarations and not result.references:
+        _write(u"No user-field declarations or references found.")
+        return
+
+    for field_name in result.field_names():
+        declarations = result.declarations_for(field_name)
+        references = result.references_for(field_name)
+        if only_issues and not any(_has_issue(r) for r in references):
+            continue
+
+        _write(u"")
+        _write(u"Field: %s" % field_name)
+        if not declarations:
+            _write(u"  Declarations: none (every reference is undeclared)")
+        for declaration in declarations:
+            _write(u"  Declaration in %s at %s"
+                   % (scope_label(declaration.scope),
+                      declaration.location))
+            _write(u"    type=%s value=%r"
+                   % (declaration.value_type, declaration.value))
+
+        if not references:
+            _write(u"  References: none (declared but never used)")
+            continue
+        _write(u"  References:")
+        for reference in references:
+            if not reference.declared:
+                _write(_location_line(reference).rstrip())
+                _write(u"      display text=%r  STATUS: undeclared "
+                       u"reference" % reference.display_text)
+                continue
+            declaration = reference.declaration
+            _write(_location_line(reference).rstrip())
+            _write(u"      display text=%r" % reference.display_text)
+            _write(u"      declared in %s: type=%s value=%r  STATUS: %s"
+                   % (scope_label(declaration.scope),
+                      declaration.value_type, declaration.value,
+                      reference.status))
+
+    undeclared = result.undeclared_references
+    stale = result.stale_references
+    display_differs = result.display_differ_references
+    _write(u"")
+    _write(u"Summary")
+    _write(u"  declarations: %d" % len(result.declarations))
+    _write(u"  references:   %d" % len(result.references))
+    _write(u"  undeclared references: %d" % len(undeclared))
+    for reference in undeclared:
+        _write(u"    %s (%s) at %s" % (
+            reference.name, scope_label(reference.scope),
+            reference.location))
+    _write(u"  stale display text:    %d" % len(stale))
+    for reference in stale:
+        _write(u"    %s at %s displays %r, declared value %r" % (
+            reference.name, reference.location,
+            reference.display_text, reference.declaration.value))
+    _write(u"  display differs (non-string, maybe formatting only): %d"
+           % len(display_differs))
+    for reference in display_differs:
+        _write(u"    %s at %s displays %r, declared value %r" % (
+            reference.name, reference.location,
+            reference.display_text, reference.declaration.value))
+
+
+def render_json(result):
+    payload = result.as_dict()
+    if only_issues:
+        payload[u'declarations'] = []
+        payload[u'references'] = [
+            reference.as_dict()
+            for reference in result.references
+            if _has_issue(reference)]
+    return payload
+
+
+json_documents = []
+overall_issue = False
+for index, inputfile in enumerate(inputfiles):
+    try:
+        result = audit_package(inputfile, field_filters or None)
+    except (TypeError, zipfile.BadZipFile, OSError,
+            xml.sax.SAXException, DefusedXmlException) as error:
+        if use_json:
+            json_documents.append(
+                {u'source': inputfile, u'error': unicode(error)})
+        else:
+            if index:
+                _write(u"")
+            _write(u"User-field audit of %s" % inputfile)
+            _write(u"  ERROR: %s" % error)
+        overall_issue = True
+        continue
+
+    if use_json:
+        json_documents.append(render_json(result))
+    else:
+        if index:
+            _write(u"")
+        render_text(result)
+
+    if result.undeclared_references or result.stale_references:
+        overall_issue = True
+
+if use_json:
+    sys.stdout.write(json.dumps(
+        json_documents, ensure_ascii=False, indent=2, sort_keys=True))
+    sys.stdout.write(u"\n")
+
+sys.exit(1 if overall_issue else 0)

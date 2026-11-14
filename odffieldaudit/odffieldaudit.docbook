@@ -1,0 +1,131 @@
+<?xml version="1.0" ?>
+<!DOCTYPE refentry PUBLIC "-//OASIS//DTD DocBook XML V4.2//EN"
+   "http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd">
+<refentry id="odffieldaudit">
+  <refentryinfo>
+    <productname>odfpy</productname>
+  </refentryinfo>
+  <refmeta>
+    <refentrytitle>odffieldaudit</refentrytitle>
+    <manvolnum>1</manvolnum>
+    <refmiscinfo class="manual">User commands</refmiscinfo>
+  </refmeta>
+
+<refnamediv>
+<refname>odffieldaudit</refname>
+<refpurpose>Audit user-field declarations, references and cached display text in an ODF file</refpurpose>
+</refnamediv>
+
+<refsynopsisdiv>
+<cmdsynopsis>
+    <command>odffieldaudit</command>
+    <arg rep="repeat">-f <replaceable>field</replaceable></arg>
+    <arg>-j</arg>
+    <arg>--json</arg>
+    <arg>--only-issues</arg>
+    <arg choice="plain" rep="repeat"><replaceable>path</replaceable></arg>
+</cmdsynopsis>
+</refsynopsisdiv>
+
+<refsect1><title>Description</title>
+<para>
+<command>odffieldaudit</command> reports where a user field is really
+used in an OpenDocument package.  Only genuine field references
+(<sgmltag class="elementname">text:user-field-get</sgmltag> and
+<sgmltag class="elementname">text:user-field-input</sgmltag>) are
+reported; ordinary body text that merely happens to spell the same
+value is not a reference and is never listed.
+</para>
+<para>
+For every field the program shows its declarations
+(<sgmltag class="elementname">text:user-field-decl</sgmltag>) with the
+declared value type and value, and every reference together with the
+display text cached inside the reference element.  Office applications
+only refresh that cached text when fields are updated, so a string
+field whose cached text differs from its declared value is flagged as
+<quote>stale</quote>.  For non-string fields (numbers, dates, booleans)
+a difference is reported as <quote>display-differs</quote>, because it
+may simply result from number or date formatting.
+</para>
+<para>
+References whose name has no matching declaration in the same document
+scope are listed as undeclared references.  Each embedded object (the
+<quote>Object N</quote> folders, including nested objects) is an
+independent document, so a field inside an object is resolved against
+that object's own declarations only, never against the host document.
+</para>
+<para>
+Every reported occurrence carries a location of the form
+<replaceable>part</replaceable>:<replaceable>line</replaceable>:<replaceable>column</replaceable>
+that points at the opening tag of the element, for example
+<filename>styles.xml:11:11</filename> for a field used in a page header.
+</para>
+<para>
+<quote>Path</quote> is assumed to be an OpenDocument file of text,
+spreadsheet or presentation type.  More than one path may be given so
+that several files can be audited in one batch; a file that cannot be
+opened is reported as an error while the remaining files are still
+processed.
+</para>
+</refsect1>
+
+<refsect1><title>Options</title>
+<variablelist>
+
+<varlistentry>
+<term>-f <replaceable>field</replaceable></term>
+<listitem>
+<para>
+Restrict the audit to the named user field.  The option may be given
+more than once.  By default all user fields are audited.
+</para>
+</listitem>
+</varlistentry>
+
+<varlistentry>
+<term>-j</term>
+<term>--json</term>
+<listitem>
+<para>
+Emit machine readable JSON instead of the human readable text report.
+</para>
+</listitem>
+</varlistentry>
+
+<varlistentry>
+<term>--only-issues</term>
+<listitem>
+<para>
+Only list undeclared references and references whose cached display
+text differs from the declared value.
+</para>
+</listitem>
+</varlistentry>
+
+</variablelist>
+</refsect1>
+
+<refsect1><title>Exit status</title>
+<para>
+The program exits with status <returnvalue>1</returnvalue> when at least
+one undeclared reference or stale string field was found, and
+<returnvalue>0</returnvalue> otherwise.  Non-string
+<quote>display-differs</quote> findings do not change the exit status on
+their own.
+</para>
+</refsect1>
+
+<refsect1><title>Example</title>
+<screen>
+odffieldaudit -f 批号 document.odt
+odffieldaudit --json --only-issues document.odt
+</screen>
+</refsect1>
+
+<refsect1><title>See Also</title>
+<para>
+<command>odfuserfield</command>(1)
+</para>
+</refsect1>
+
+</refentry>
