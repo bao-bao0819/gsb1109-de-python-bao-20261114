@@ -7,6 +7,8 @@ import unittest
 
 import os, sys
 import io
+import struct
+import datetime
 from shutil import copy2
 
 # Insert the olefile package relative to this test dir in the sys.path
@@ -274,6 +276,200 @@ class FileHandleCloseTest(unittest.TestCase):
     #
     #     # now should be closed
     #     self.assertTrue(file_handle.closed)
+
+
+class TestOleTimestamp(unittest.TestCase):
+    'Unit tests for the provenance-aware OleTimestamp model'
+
+    def test_zero_filetime_is_missing_not_epoch(self):
+        ts = olefile.make_instant(0, 'directory entry', 'modification time', 'X')
+        self.assertTrue(ts.is_missing)
+        self.assertIsNone(ts.value)
+        self.assertIsNone(ts.filetime)
+
+    def test_nonzero_filetime_is_instant(self):
+        # FILETIME 130416885353850000 -> 2014-04-11 11:15:35.385 UTC
+        ts = olefile.make_instant(130416885353850000, 'directory entry',
+                                  'modification time', 'Root Entry')
+        self.assertTrue(ts.is_instant)
+        self.assertEqual(ts.filetime, 130416885353850000)
+        self.assertEqual(ts.value.year, 2014)
+        self.assertEqual(ts.source, 'directory entry')
+        self.assertEqual(ts.path, 'Root Entry')
+
+    def test_duration_is_distinct_from_instant(self):
+        ts = olefile.make_duration(0, 'property set', 'property #10 (total_edit_time)')
+        self.assertTrue(ts.is_duration)
+        self.assertFalse(ts.is_instant)
+        # a zero duration is a real value, not a missing field:
+        self.assertEqual(ts.value, datetime.timedelta(0))
+        self.assertEqual(ts.filetime, 0)
+
+    def test_missing_never_sorts_before_instants(self):
+        instant = olefile.make_instant(130416885000000000, 's', 'l', 'a')
+        missing = olefile.make_missing('s', 'l', 'b')
+        ordered = sorted([missing, instant])
+        self.assertTrue(ordered[0].is_instant)
+        self.assertTrue(ordered[-1].is_missing)
+
+    def test_same_microsecond_keeps_raw_order(self):
+        # 4 ticks = 400ns apart: identical once truncated to microseconds,
+        # but the raw 100ns FILETIME order must be preserved.
+        base = 130416885000000000
+        first = olefile.make_instant(base, 's', 'l', 'a')
+        second = olefile.make_instant(base + 4, 's', 'l', 'b')
+        self.assertEqual(first.value, second.value)
+        self.assertLess(first, second)
+        self.assertEqual([t.filetime for t in sorted([second, first])],
+                         [base, base + 4])
+
+    def test_durations_follow_instants(self):
+        instant = olefile.make_instant(10, 's', 'l', 'a')
+        duration = olefile.make_duration(10 ** 12, 's', 'l', 'd')
+        missing = olefile.make_missing('s', 'l', 'm')
+        kinds = [t.kind for t in sorted([missing, duration, instant])]
+        self.assertEqual(kinds, [
+            olefile.TIMESTAMP_KIND_INSTANT,
+            olefile.TIMESTAMP_KIND_DURATION,
+            olefile.TIMESTAMP_KIND_MISSING])
+
+    def test_text_roundtrip(self):
+        ts = olefile.OleTimestamp(
+            olefile.TIMESTAMP_KIND_INSTANT, 130416885353850000,
+            'source:with:colons', 'field', 'path\\name')
+        restored = olefile.OleTimestamp.from_text(ts.to_text())
+        self.assertEqual(restored, ts)
+
+    def test_text_roundtrip_missing_and_duration(self):
+        for ts in (
+                olefile.make_missing('s', 'l', 'p'),
+                olefile.make_duration(1234567, 's', 'l', 'p')):
+            self.assertEqual(olefile.OleTimestamp.from_text(ts.to_text()), ts)
+
+    def test_from_text_rejects_foreign_lines(self):
+        with self.assertRaises(ValueError):
+            olefile.OleTimestamp.from_text('not a timeline record')
+        with self.assertRaises(ValueError):
+            olefile.OleTimestamp.from_text('olets:v1:bogus:1:s:p:l')
+
+
+class TestTimeline(unittest.TestCase):
+    'Tests for timeline collection, export and readback'
+
+    def setUp(self):
+        self.ole_file = u"tests/images/test-ole-file.doc"
+        self.ole = olefile.OleFileIO(self.ole_file)
+
+    def tearDown(self):
+        self.ole.close()
+
+    def test_directory_timestamps_distinguish_missing(self):
+        root = self.ole.direntries[0]
+        creation, modification = root.timestamps()
+        # root entry has no creation time: it must be a missing record,
+        # not an event at the 1601 epoch:
+        self.assertTrue(creation.is_missing)
+        self.assertTrue(modification.is_instant)
+        self.assertEqual(modification.filetime, root.modifyTime)
+        self.assertEqual(creation.source, 'directory entry')
+
+    def test_metadata_timeline_kinds(self):
+        meta = self.ole.get_metadata()
+        by_label = {t.label: t for t in meta.timeline}
+        edit = by_label['property #10 (total_edit_time)']
+        self.assertTrue(edit.is_duration)
+        self.assertTrue(by_label['property #12 (create_time)'].is_instant)
+        self.assertTrue(by_label['property #13 (last_saved_time)'].is_instant)
+        # last_printed is absent in this file: recorded explicitly as missing
+        self.assertTrue(by_label['property #11 (last_printed)'].is_missing)
+
+    def test_timeline_order_and_missing_placement(self):
+        timeline = self.ole.get_timeline()
+        kinds = [t.kind for t in timeline]
+        self.assertIn(olefile.TIMESTAMP_KIND_INSTANT, kinds)
+        first_missing = next(i for i, t in enumerate(timeline) if t.is_missing)
+        self.assertTrue(all(not t.is_missing for t in timeline[:first_missing]))
+        # every record carries provenance and, when set, a raw FILETIME
+        for event in timeline:
+            self.assertTrue(event.source)
+            self.assertTrue(event.label)
+            if event.is_instant:
+                self.assertIsNotNone(event.filetime)
+
+    def test_exclude_missing(self):
+        timeline = self.ole.get_timeline(include_missing=False)
+        self.assertTrue(timeline)
+        self.assertTrue(all(not t.is_missing for t in timeline))
+
+    def test_export_and_readback_restores_order(self):
+        timeline = self.ole.get_timeline()
+        text = self.ole.export_timeline()
+        read_back = olefile.OleFileIO.read_timeline(text)
+        self.assertEqual(read_back, timeline)
+        self.assertEqual([t.filetime for t in read_back],
+                         [t.filetime for t in timeline])
+        # reading an iterable of lines and bytes also works:
+        self.assertEqual(
+            olefile.OleFileIO.read_timeline(text.encode('utf-8')), timeline)
+
+    def test_get_timestamps_delegates_to_entry(self):
+        records = self.ole.get_timestamps('WordDocument')
+        self.assertEqual(len(records), 2)
+        self.assertTrue(all(t.is_missing for t in records))
+
+
+class TestTimelinePrecision(unittest.TestCase):
+    'Byte-level tests for sub-microsecond FILETIME ordering'
+
+    def setUp(self):
+        self.ole_file = u"tests/images/test-ole-file.doc"
+        self.temp_file = u"tests/images/test-ole-file-timeline.doc"
+        copy2(self.ole_file, self.temp_file)
+
+    def tearDown(self):
+        if os.path.isfile(self.temp_file):
+            os.remove(self.temp_file)
+
+    def _patch_dir_modify_time(self, ole, sid, new_mtime):
+        chain = []
+        sector = ole.first_dir_sector
+        while sector != olefile.ENDOFCHAIN:
+            chain.append(sector)
+            sector = ole.fat[sector]
+        sector = chain[(sid * 128) // ole.sectorsize]
+        local_offset = (sid * 128) % ole.sectorsize
+        data = bytearray(ole.getsect(sector))
+        struct.pack_into('<Q', data, local_offset + 108, new_mtime)
+        ole.write_sect(sector, bytes(data))
+
+    def test_same_microsecond_filetimes_keep_order_after_roundtrip(self):
+        base = 130416885000000000  # exact microsecond multiple
+        first_ticks, second_ticks = base, base + 4  # 400ns apart
+        ole = olefile.OleFileIO(self.temp_file, write_mode=True)
+        self._patch_dir_modify_time(ole, 1, first_ticks)   # 1Table
+        self._patch_dir_modify_time(ole, 2, second_ticks)  # WordDocument
+        ole.close()
+
+        ole = olefile.OleFileIO(self.temp_file)
+        pair = {t.path: t for t in ole.get_timeline()
+                if t.source == 'directory entry'
+                and t.label == 'modification time'
+                and t.path in ('1Table', 'WordDocument')}
+        first = pair['1Table']
+        second = pair['WordDocument']
+        # both display the same microsecond, but raw precision orders them:
+        self.assertEqual(first.value, second.value)
+        self.assertLess(first, second)
+        self.assertEqual(second.filetime, second_ticks)
+
+        read_back = olefile.OleFileIO.read_timeline(ole.export_timeline())
+        restored = {t.path: t for t in read_back
+                    if t.path in ('1Table', 'WordDocument')
+                    and t.label == 'modification time'}
+        self.assertLess(restored['1Table'].filetime,
+                        restored['WordDocument'].filetime)
+        self.assertEqual(restored['WordDocument'].filetime, second_ticks)
+        ole.close()
 
 
 if __name__ == '__main__':

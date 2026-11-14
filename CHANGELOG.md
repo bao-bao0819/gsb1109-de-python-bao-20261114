@@ -3,6 +3,21 @@ Detailed CHANGELOG
 
 olefile.py
 ----------
+* 2026-11-14 v0.48.dev1:
+    - added provenance-aware timeline collection: new OleTimestamp model
+      distinguishing absolute instants, durations (e.g. total_edit_time) and
+      missing/unset timestamp fields, each carrying its source, field label,
+      path and raw 100ns FILETIME value
+    - added OleDirectoryEntry.timestamps, OleFileIO.get_timestamps and
+      OleFileIO.get_timeline: unset directory entry times are reported as
+      missing instead of epoch events and never sort first; events keep their
+      raw FILETIME order so values shown with the same microsecond can still
+      be re-ordered by original precision
+    - added OleFileIO.export_timeline and OleFileIO.read_timeline for a
+      portable text format that restores the exact ordering after a roundtrip
+    - property parsers (getproperties, get_userdefined_properties) accept an
+      optional timestamp sink while returning the same legacy values
+    - CLI: added -t to display the timeline and --export-timeline to export it
 * 2023-11-30 v0.47.dev6:
     - fixed issue #142: isOleFile has a new data parameter to handle files in memory properly
     - fixed issue #156: write_sect now correctly detects when data is larger than the sector size

@@ -98,7 +98,11 @@ __all__ = ['isOleFile', 'OleFileIO', 'OleMetadata', 'enable_logging',
            'DEFECT_FATAL', 'DEFAULT_PATH_ENCODING',
            'MAXREGSECT', 'DIFSECT', 'FATSECT', 'ENDOFCHAIN', 'FREESECT',
            'MAXREGSID', 'NOSTREAM', 'UNKNOWN_SIZE', 'WORD_CLSID',
-           'OleFileIONotClosed'
+           'OleFileIONotClosed',
+           'OleTimestamp', 'make_instant', 'make_duration', 'make_missing',
+           'timeline_sort_key',
+           'TIMESTAMP_KIND_INSTANT', 'TIMESTAMP_KIND_DURATION',
+           'TIMESTAMP_KIND_MISSING'
 ]
 
 import io
@@ -388,6 +392,319 @@ def filetime2datetime(filetime):
     return _FILETIME_null_date + datetime.timedelta(microseconds=filetime//10)
 
 
+# --- Provenance-aware timestamps ---------------------------------------------
+
+# Kinds of timestamp values found while collecting an OLE timeline:
+
+#: an absolute point in time, stored as a Windows FILETIME
+#: (number of 100ns ticks since 1601-01-01 UTC)
+TIMESTAMP_KIND_INSTANT = 'instant'
+
+#: an elapsed duration stored in FILETIME-like 100ns ticks (for example the
+#: total editing time, which looks like a date in property sets but is not one)
+TIMESTAMP_KIND_DURATION = 'duration'
+
+#: a timestamp field that exists in the structure but was not set (zero/null)
+TIMESTAMP_KIND_MISSING = 'missing'
+
+_TIMESTAMP_KINDS = (TIMESTAMP_KIND_INSTANT, TIMESTAMP_KIND_DURATION,
+                    TIMESTAMP_KIND_MISSING)
+
+_TIMESTAMP_SORT_RANK = {
+    TIMESTAMP_KIND_INSTANT: 0,
+    TIMESTAMP_KIND_DURATION: 1,
+    TIMESTAMP_KIND_MISSING: 2,
+}
+
+#: prefix of the portable single-line text representation of an OleTimestamp
+OLETS_PREFIX = 'olets:v1:'
+
+_FILETIME_TICKS_PER_MICROSECOND = 10
+
+# Well-known SummaryInformation property names, used to label timeline events
+# (property ids start at 1; only FILETIME-shaped ones are listed here):
+SUMMARY_PROPERTY_NAMES = {
+    10: 'total_edit_time',
+    11: 'last_printed',
+    12: 'create_time',
+    13: 'last_saved_time',
+}
+
+# SummaryInformation property ids that carry a FILETIME-shaped value
+# (id 10 total_edit_time is a duration rather than an absolute timestamp):
+SUMMARY_TIMESTAMP_IDS = tuple(sorted(SUMMARY_PROPERTY_NAMES))
+
+
+def _escape_olets_field(value):
+    """
+    Escape one field of the olets text representation, so that colons,
+    backslashes and control characters cannot break the line structure.
+    """
+    if not value:
+        return ''
+    return (value.replace('\\', '\\\\')
+                 .replace(':', '\\c')
+                 .replace('\n', '\\n')
+                 .replace('\r', '\\r')
+                 .replace('\t', '\\t'))
+
+
+def _unescape_olets_field(value):
+    """
+    Reverse _escape_olets_field.
+    """
+    if not value:
+        return ''
+    unescape_map = {'\\': '\\', 'c': ':', 'n': '\n', 'r': '\r', 't': '\t'}
+    result = []
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if char == '\\' and index + 1 < len(value):
+            result.append(unescape_map.get(value[index+1], value[index+1]))
+            index += 2
+        else:
+            result.append(char)
+            index += 1
+    return ''.join(result)
+
+
+class OleTimestamp(object):
+    """
+    One timestamp collected from an OLE file, together with its provenance.
+
+    Unlike a bare ``datetime`` or integer, an :class:`OleTimestamp` records:
+
+      - where the value comes from (``source``: a directory entry or a
+        property set)
+      - which field it is (``label``, e.g. ``"modification time"``)
+      - the path of the storage/stream it applies to (``path``)
+      - the raw unsigned 64-bit FILETIME value (``filetime``), keeping the
+        original 100-nanosecond precision
+      - the semantic ``kind`` of the value:
+
+        * :data:`TIMESTAMP_KIND_INSTANT`: an absolute point in time
+        * :data:`TIMESTAMP_KIND_DURATION`: an elapsed duration, not a date
+        * :data:`TIMESTAMP_KIND_MISSING`: the field exists but was never set
+
+    Missing timestamps are never confused with the FILETIME epoch
+    (1601-01-01), and durations are never ordered as events on a timeline.
+
+    Objects are sortable: instants come first, ordered by their raw 100ns
+    ticks, so two values converted to the same Python microsecond still keep
+    their real relative order. Durations follow and missing records are last.
+
+    New in version 0.48.
+    """
+
+    __slots__ = ('kind', 'filetime', 'source', 'label', 'path')
+
+    def __init__(self, kind, filetime=None, source=None, label=None,
+                 path=None):
+        if kind not in _TIMESTAMP_KINDS:
+            raise ValueError('unknown timestamp kind: %r' % (kind,))
+        self.kind = kind
+        self.filetime = None if filetime is None else int(filetime)
+        self.source = source
+        self.label = label
+        self.path = path
+
+    @property
+    def raw(self):
+        """Raw FILETIME value (number of 100ns ticks), or None if unavailable."""
+        return self.filetime
+
+    @property
+    def value(self):
+        """
+        Python value carried by the timestamp:
+
+        - a ``datetime.datetime`` for an instant (UTC, microsecond precision)
+        - a ``datetime.timedelta`` for a duration
+        - ``None`` when missing or when no raw value is available
+        """
+        if self.kind == TIMESTAMP_KIND_INSTANT and self.filetime is not None:
+            return filetime2datetime(self.filetime)
+        if self.kind == TIMESTAMP_KIND_DURATION and self.filetime is not None:
+            return datetime.timedelta(
+                microseconds=self.filetime // _FILETIME_TICKS_PER_MICROSECOND)
+        return None
+
+    @property
+    def is_instant(self):
+        """True if this is an absolute point in time."""
+        return self.kind == TIMESTAMP_KIND_INSTANT
+
+    @property
+    def is_duration(self):
+        """True if this is an elapsed duration rather than a date."""
+        return self.kind == TIMESTAMP_KIND_DURATION
+
+    @property
+    def is_missing(self):
+        """True if the timestamp field exists but was left unset."""
+        return self.kind == TIMESTAMP_KIND_MISSING
+
+    def order_key(self):
+        """
+        Sort key preserving the original FILETIME precision.
+
+        Instants come first, ordered by their raw 100ns ticks so that values
+        converted to the same Python microsecond keep their real order.
+        Durations follow and missing timestamps are always placed last, so an
+        unset directory entry never becomes the earliest timeline event.
+        Provenance fields are used only as final, deterministic tie-breakers.
+        """
+        ticks = self.filetime if self.filetime is not None else -1
+        return (_TIMESTAMP_SORT_RANK[self.kind], ticks,
+                self.path or '', self.source or '', self.label or '')
+
+    def __eq__(self, other):
+        if not isinstance(other, OleTimestamp):
+            return NotImplemented
+        return (self.kind == other.kind
+                and self.filetime == other.filetime
+                and (self.source or '') == (other.source or '')
+                and (self.label or '') == (other.label or '')
+                and (self.path or '') == (other.path or ''))
+
+    def __ne__(self, other):
+        result = self.__eq__(other)
+        if result is NotImplemented:
+            return result
+        return not result
+
+    def __lt__(self, other):
+        if not isinstance(other, OleTimestamp):
+            return NotImplemented
+        return self.order_key() < other.order_key()
+
+    def __hash__(self):
+        return hash((self.kind, self.filetime, self.source or None,
+                     self.label or None, self.path or None))
+
+    def __repr__(self):
+        return ('OleTimestamp(kind=%r, filetime=%r, source=%r, label=%r, '
+                'path=%r)' % (self.kind, self.filetime, self.source,
+                              self.label, self.path))
+
+    def describe(self):
+        """Human-readable description of the timestamp value."""
+        if self.kind == TIMESTAMP_KIND_MISSING:
+            return 'missing'
+        if self.kind == TIMESTAMP_KIND_DURATION:
+            if self.filetime is None:
+                return 'duration (unknown)'
+            return 'duration %s (%d ticks)' % (self.value, self.filetime)
+        if self.filetime is not None:
+            return self.value.isoformat(' ')
+        return 'missing'
+
+    def to_text(self):
+        """
+        Portable single-line text representation, suitable for export.
+
+        The format (``olets:v1:...``) is parsed back by :meth:`from_text`
+        without losing the raw FILETIME precision, provenance or ordering.
+        """
+        ticks = '-' if self.filetime is None else str(self.filetime)
+        return '%s%s:%s:%s:%s:%s' % (
+            OLETS_PREFIX, self.kind, ticks,
+            _escape_olets_field(self.source),
+            _escape_olets_field(self.path),
+            _escape_olets_field(self.label))
+
+    @classmethod
+    def from_text(cls, text):
+        """
+        Parse a line produced by :meth:`to_text` back into an OleTimestamp.
+
+        :raises ValueError: if the text does not use the ``olets:v1`` format
+            or contains an unknown timestamp kind.
+        """
+        if not isinstance(text, basestring) or not text.startswith(OLETS_PREFIX):
+            raise ValueError('not an OLE timestamp text record: %r' % (text,))
+        parts = text.split(':')
+        if len(parts) != 7:
+            raise ValueError(
+                'malformed OLE timestamp text record: %r' % (text,))
+        _tag, _version, kind, ticks_text, source, path, label = parts
+        if kind not in _TIMESTAMP_KINDS:
+            raise ValueError(
+                'unknown timestamp kind %r in: %r' % (kind, text))
+        filetime = None if ticks_text == '-' else int(ticks_text)
+        return cls(kind, filetime,
+                   _unescape_olets_field(source) or None,
+                   _unescape_olets_field(label) or None,
+                   _unescape_olets_field(path) or None)
+
+
+def make_instant(filetime, source, label, path=None):
+    """
+    Build an instant :class:`OleTimestamp` from a raw FILETIME value.
+
+    A zero/null FILETIME means the field was never set: a missing record is
+    returned instead of an event dated 1601-01-01, so it can never become the
+    earliest event of a timeline.
+    """
+    if not filetime:
+        return OleTimestamp(TIMESTAMP_KIND_MISSING, None, source, label, path)
+    return OleTimestamp(TIMESTAMP_KIND_INSTANT, int(filetime),
+                        source, label, path)
+
+
+def make_duration(ticks, source, label, path=None):
+    """
+    Build a duration :class:`OleTimestamp` from raw 100ns ticks.
+
+    A zero duration is a real value (no time spent), not a missing field.
+    """
+    return OleTimestamp(TIMESTAMP_KIND_DURATION,
+                        None if ticks is None else int(ticks),
+                        source, label, path)
+
+
+def make_missing(source, label, path=None):
+    """Build a missing :class:`OleTimestamp` for an unset timestamp field."""
+    return OleTimestamp(TIMESTAMP_KIND_MISSING, None, source, label, path)
+
+
+def timeline_sort_key(timestamp):
+    """
+    Sort key function for timeline events, see OleTimestamp.order_key.
+    """
+    return timestamp.order_key()
+
+
+class _TimestampSink(object):
+    """
+    Internal collector passed through the property parsers to gather
+    OleTimestamp records while keeping their legacy return values unchanged.
+    """
+
+    def __init__(self, source, path, no_conversion=None, names=None):
+        self.source = source
+        self.path = path
+        self.no_conversion = set(no_conversion or [])
+        self.names = names if names is not None else SUMMARY_PROPERTY_NAMES
+        self.events = []
+
+    def add(self, filetime, property_id, label=None):
+        if label is None:
+            name = self.names.get(property_id)
+            if name:
+                label = 'property #%d (%s)' % (property_id, name)
+            else:
+                label = 'property #%d' % property_id
+        if property_id in self.no_conversion:
+            # properties excluded from time conversion are durations such as
+            # the total editing time, not absolute points in time:
+            event = make_duration(filetime, self.source, label, self.path)
+        else:
+            event = make_instant(filetime, self.source, label, self.path)
+        self.events.append(event)
+
+
 
 #=== CLASSES ==================================================================
 
@@ -419,6 +736,10 @@ class OleMetadata:
 
     Note: an attribute is set to None when not present in the properties of the
     OLE file.
+
+    The ``timeline`` attribute contains provenance-aware
+    :class:`OleTimestamp` records for every timestamp-shaped property,
+    including durations such as ``total_edit_time`` and missing fields.
 
     References for SummaryInformation stream:
 
@@ -509,6 +830,8 @@ class OleMetadata:
         self.content_status = None
         self.language = None
         self.doc_version = None
+        # provenance-aware timestamp records collected while parsing:
+        self.timeline = []
 
     def parse_properties(self, ole_file):
         """
@@ -518,31 +841,56 @@ class OleMetadata:
         Properties are converted to strings, integers or python datetime objects.
         If a property is not present, its value is set to None.
 
+        Every timestamp-shaped property is also stored in the ``timeline``
+        attribute as an :class:`OleTimestamp`, preserving its source, its raw
+        100ns FILETIME precision and its semantic kind (instant, duration or
+        missing).
+
         :param ole_file: OleFileIO object from which to parse properties
         """
         # first set all attributes to None:
         for attrib in (self.SUMMARY_ATTRIBS + self.DOCSUM_ATTRIBS):
             setattr(self, attrib, None)
+        # reset the timeline so parse_properties can be called more than once:
+        self.timeline = []
         if ole_file.exists("\x05SummaryInformation"):
             # get properties from the stream:
             # (converting timestamps to python datetime, except total_edit_time,
             # which is property #10)
+            summary_sink = _TimestampSink(
+                source='property set \\x05SummaryInformation',
+                path='\\x05SummaryInformation', no_conversion=[10])
             props = ole_file.getproperties("\x05SummaryInformation",
-                                           convert_time=True, no_conversion=[10])
+                                           convert_time=True, no_conversion=[10],
+                                           timestamp_sink=summary_sink)
             # store them into this object's attributes:
             for i in range(len(self.SUMMARY_ATTRIBS)):
                 # ids for standards properties start at 0x01, until 0x13
                 value = props.get(i+1, None)
                 setattr(self, self.SUMMARY_ATTRIBS[i], value)
+            self.timeline.extend(summary_sink.events)
+            # standard timestamp properties absent from the stream are unset
+            # fields: record them explicitly as missing instead of dropping them
+            for property_id in SUMMARY_TIMESTAMP_IDS:
+                if property_id not in props:
+                    label = 'property #%d (%s)' % (
+                        property_id, SUMMARY_PROPERTY_NAMES[property_id])
+                    self.timeline.append(make_missing(
+                        summary_sink.source, label, summary_sink.path))
         if ole_file.exists("\x05DocumentSummaryInformation"):
             # get properties from the stream:
+            docsum_sink = _TimestampSink(
+                source='property set \\x05DocumentSummaryInformation',
+                path='\\x05DocumentSummaryInformation')
             props = ole_file.getproperties("\x05DocumentSummaryInformation",
-                                           convert_time=True)
+                                           convert_time=True,
+                                           timestamp_sink=docsum_sink)
             # store them into this object's attributes:
             for i in range(len(self.DOCSUM_ATTRIBS)):
                 # ids for standards properties start at 0x01, until 0x13
                 value = props.get(i+1, None)
                 setattr(self, self.DOCSUM_ATTRIBS[i], value)
+            self.timeline.extend(docsum_sink.events)
 
     def dump(self):
         """
@@ -1012,6 +1360,26 @@ class OleDirectoryEntry:
         if self.createTime == 0:
             return None
         return filetime2datetime(self.createTime)
+
+    def timestamps(self):
+        """
+        Return the creation and modification timestamps of this directory
+        entry as provenance-aware :class:`OleTimestamp` records.
+
+        Two records are always returned, one for each field. Unset fields
+        (zero FILETIME) are returned as missing records instead of events at
+        the FILETIME epoch (1601-01-01), so they cannot be mistaken for the
+        earliest event of a timeline. The raw FILETIME values keep their
+        original 100-nanosecond precision.
+
+        new in version 0.48
+        """
+        source = 'directory entry'
+        path = self.name
+        return [
+            make_instant(self.createTime, source, 'creation time', path),
+            make_instant(self.modifyTime, source, 'modification time', path),
+        ]
 
 
 #--- OleFileIO ----------------------------------------------------------------
@@ -2111,6 +2479,22 @@ class OleFileIO:
         entry = self.direntries[sid]
         return entry.getctime()
 
+    def get_timestamps(self, filename):
+        """
+        Return the provenance-aware creation and modification timestamps of a
+        stream/storage.
+
+        :param filename: path of stream/storage in storage tree. (see openstream
+            for syntax)
+        :returns: a list of two :class:`OleTimestamp` records (creation then
+            modification); unset fields are missing records, not epoch events
+
+        new in version 0.48
+        """
+        sid = self._find(filename)
+        entry = self.direntries[sid]
+        return entry.timestamps()
+
     def exists(self, filename):
         """
         Test if given filename exists as a stream or a storage in the OLE
@@ -2149,7 +2533,8 @@ class OleFileIO:
         """
         return self.root.name
 
-    def getproperties(self, filename, convert_time=False, no_conversion=None):
+    def getproperties(self, filename, convert_time=False, no_conversion=None,
+                      timestamp_sink=None):
         """
         Return properties described in substream.
 
@@ -2157,6 +2542,9 @@ class OleFileIO:
         :param convert_time: bool, if True timestamps will be converted to Python datetime
         :param no_conversion: None or list of int, timestamps not to be converted
             (for example total editing time is not a real timestamp)
+        :param timestamp_sink: optional :class:`_TimestampSink` collecting
+            provenance-aware :class:`OleTimestamp` records for every
+            VT_FILETIME property, without changing the returned values
 
         :returns: a dictionary of values indexed by id (integer)
         """
@@ -2202,7 +2590,7 @@ class OleFileIO:
                 vt_name = VT.get(property_type, 'UNKNOWN')
                 log.debug('property id=%d: type=%d/%s offset=%X' % (property_id, property_type, vt_name, offset))
 
-                value = self._parse_property(s, offset+4, property_id, property_type, convert_time, no_conversion)
+                value = self._parse_property(s, offset+4, property_id, property_type, convert_time, no_conversion, timestamp_sink)
                 data[property_id] = value
             except BaseException as exc:
                 # catch exception while parsing each property, and only raise
@@ -2213,10 +2601,10 @@ class OleFileIO:
 
         return data
 
-    def _parse_property(self, s, offset, property_id, property_type, convert_time, no_conversion):
+    def _parse_property(self, s, offset, property_id, property_type, convert_time, no_conversion, timestamp_sink=None):
         v = None
         if property_type <= VT_BLOB or property_type in (VT_CLSID, VT_CF):
-            v, _ = self._parse_property_basic(s, offset, property_id, property_type, convert_time, no_conversion)
+            v, _ = self._parse_property_basic(s, offset, property_id, property_type, convert_time, no_conversion, timestamp_sink)
         elif property_type == VT_VECTOR | VT_VARIANT:
             log.debug('property_type == VT_VECTOR | VT_VARIANT')
             off = 4
@@ -2224,7 +2612,7 @@ class OleFileIO:
             values = []
             for _ in range(count):
                 property_type = i32(s, offset + off)
-                v, sz  = self._parse_property_basic(s, offset + off + 4, property_id, property_type, convert_time, no_conversion)
+                v, sz  = self._parse_property_basic(s, offset + off + 4, property_id, property_type, convert_time, no_conversion, timestamp_sink)
                 values.append(v)
                 off += sz + 4
             v = values
@@ -2236,7 +2624,7 @@ class OleFileIO:
             count = i32(s, offset)
             values = []
             for _ in range(count):
-                v, sz = self._parse_property_basic(s, offset + off, property_id, property_type & ~VT_VECTOR, convert_time, no_conversion)
+                v, sz = self._parse_property_basic(s, offset + off, property_id, property_type & ~VT_VECTOR, convert_time, no_conversion, timestamp_sink)
                 values.append(v)
                 off += sz
             v = values
@@ -2244,7 +2632,7 @@ class OleFileIO:
             log.debug('property id=%d: type=%d not implemented in parser yet' % (property_id, property_type))
         return v
 
-    def _parse_property_basic(self, s, offset, property_id, property_type, convert_time, no_conversion):
+    def _parse_property_basic(self, s, offset, property_id, property_type, convert_time, no_conversion, timestamp_sink=None):
             value = None
             size = 0
             # test for common types first (should perhaps use
@@ -2293,6 +2681,10 @@ class OleFileIO:
                 size = 4 + count * 2
             elif property_type == VT_FILETIME:
                 value = long(i32(s, offset)) + (long(i32(s, offset+4))<<32)
+                # collect the provenance-aware timestamp before any conversion,
+                # keeping the raw 100ns FILETIME precision:
+                if timestamp_sink is not None:
+                    timestamp_sink.add(value, property_id)
                 # FILETIME is a 64-bit int: "number of 100ns periods
                 # since Jan 1,1601".
                 if convert_time and property_id not in no_conversion:
@@ -2350,7 +2742,97 @@ class OleFileIO:
         self.metadata.parse_properties(self)
         return self.metadata
 
-    def get_userdefined_properties(self, filename, convert_time=False, no_conversion=None):
+    def get_timeline(self, include_missing=True):
+        """
+        Collect all timestamps of the OLE file into a single ordered timeline.
+
+        The timeline merges the creation and modification times of every
+        directory entry with the timestamp-shaped properties of the standard
+        SummaryInformation and DocumentSummaryInformation property sets.
+        Every record is an :class:`OleTimestamp` carrying its provenance
+        (source, field label and stream/entry path), its semantic kind
+        (instant, duration or missing) and the raw 100ns FILETIME value.
+
+        Records are sorted with :func:`timeline_sort_key`: absolute instants
+        come first, ordered by their raw FILETIME ticks so that two values
+        displayed with the same microsecond keep their real relative order;
+        durations follow and missing records are last. A directory entry
+        without a timestamp therefore never becomes the earliest event.
+
+        :param bool include_missing: if False, unset (missing) timestamp
+            fields are left out of the returned timeline
+        :returns: a list of :class:`OleTimestamp` records
+
+        new in version 0.48
+        """
+        events = []
+        # directory entry creation/modification times:
+        for entry in self.direntries:
+            if entry is None:
+                continue
+            events.extend(entry.timestamps())
+        # standard property sets:
+        metadata = self.get_metadata()
+        events.extend(metadata.timeline)
+        if not include_missing:
+            events = [event for event in events if not event.is_missing]
+        return sorted(events, key=timeline_sort_key)
+
+    def export_timeline(self, include_missing=True):
+        """
+        Export the timeline as portable text lines (one record per line).
+
+        The output preserves raw FILETIME precision, provenance, kind and
+        ordering, and can be read back with :meth:`read_timeline` to restore
+        the exact same ordering, including instants displayed with the same
+        microsecond.
+
+        :param bool include_missing: if False, missing timestamp fields are
+            not exported
+        :returns: a string ending with a newline, or an empty string if there
+            is nothing to export
+
+        new in version 0.48
+        """
+        events = self.get_timeline(include_missing=include_missing)
+        if not events:
+            return ''
+        return '\n'.join(event.to_text() for event in events) + '\n'
+
+    @staticmethod
+    def read_timeline(text):
+        """
+        Parse timeline text produced by :meth:`export_timeline` back into
+        :class:`OleTimestamp` records.
+
+        Blank lines are ignored and records are returned in the same order as
+        in the text. The raw FILETIME values are restored exactly, so the
+        relative order of instants converted to the same microsecond is
+        preserved.
+
+        :param str text: timeline text, or an iterable of text lines
+        :returns: a list of :class:`OleTimestamp` records
+        :raises ValueError: if a non-empty line is not a valid timeline record
+
+        new in version 0.48
+        """
+        if isinstance(text, bytes):
+            text = text.decode('utf-8')
+        if isinstance(text, basestring):
+            lines = text.splitlines()
+        else:
+            lines = text
+        events = []
+        for line in lines:
+            if isinstance(line, bytes):
+                line = line.decode('utf-8')
+            line = line.strip()
+            if not line:
+                continue
+            events.append(OleTimestamp.from_text(line))
+        return events
+
+    def get_userdefined_properties(self, filename, convert_time=False, no_conversion=None, timestamp_sink=None):
         """
         Return properties described in substream.
 
@@ -2358,6 +2840,9 @@ class OleFileIO:
         :param convert_time: bool, if True timestamps will be converted to Python datetime
         :param no_conversion: None or list of int, timestamps not to be converted
             (for example total editing time is not a real timestamp)
+        :param timestamp_sink: optional :class:`_TimestampSink` collecting
+            provenance-aware :class:`OleTimestamp` records for every
+            VT_FILETIME property, without changing the returned values
 
         :returns: a dictionary of values indexed by id (integer)
         """
@@ -2475,6 +2960,10 @@ class OleFileIO:
                                 value = self._decode_utf16_str(s[offset + 8:offset + 8 + count * 2])
                             elif property_type == VT_FILETIME:
                                 value = long(i32(s, offset + 4)) + (long(i32(s, offset + 8)) << 32)
+                                # collect the provenance-aware timestamp while
+                                # keeping the raw 100ns FILETIME precision:
+                                if timestamp_sink is not None:
+                                    timestamp_sink.add(value, property_id)
                                 # FILETIME is a 64-bit int: "number of 100ns periods
                                 # since Jan 1,1601".
                                 if convert_time and property_id not in no_conversion:
@@ -2572,6 +3061,10 @@ def main():
         help='debug mode, shortcut for -l debug (displays a lot of debug information, for developers only)')
     parser.add_option('-l', '--loglevel', dest="loglevel", action="store", default=DEFAULT_LOG_LEVEL,
                             help="logging level debug/info/warning/error/critical (default=%default)")
+    parser.add_option("-t", action="store_true", dest="show_timeline",
+        help='display a provenance-aware timeline distinguishing absolute instants, durations and missing timestamps')
+    parser.add_option("--export-timeline", action="store", dest="export_timeline",
+        metavar='FILE', help='export the timeline to FILE in a portable format readable back with OleFileIO.read_timeline')
 
     (options, args) = parser.parse_args()
 
@@ -2660,6 +3153,25 @@ def main():
                     print('- {}: mtime={} ctime={}'.format(entry.name,
                         entry.getmtime(), entry.getctime()))
             print()
+
+            if options.show_timeline or options.export_timeline:
+                timeline = ole.get_timeline()
+                if options.show_timeline:
+                    print('Timeline (with provenance; raw FILETIME keeps 100ns precision):')
+                    print('  {:<8} {:<28} {:<24} {:<22} {}'.format(
+                        'kind', 'value', 'source', 'path', 'field'))
+                    for event in timeline:
+                        print('  {:<8} {:<28} {:<24} {:<22} {}'.format(
+                            event.kind, event.describe(),
+                            event.source or '', event.path or '',
+                            event.label or ''))
+                    print()
+                if options.export_timeline:
+                    with open(options.export_timeline, 'w') as export_file:
+                        export_file.write(ole.export_timeline())
+                    print('Timeline exported to %s (%d records)'
+                          % (options.export_timeline, len(timeline)))
+                    print()
 
             # parse and display metadata:
             try:
