@@ -393,6 +393,21 @@ validation
   >>> obj.errors()
   'a position must have exactly 2 or 3 values'
 
+split_antimeridian
+~~~~~~~~~~~~~~~~~~
+
+:code:`geojson.split_antimeridian` cuts geometries that cross the 180th meridian and rewrites the pieces with ordinary longitudes in ``[-180, 180]``. Polygon holes stay attached to the exterior piece that contains them, and feature properties, identifiers and foreign members are preserved. A feature whose polygon or line string crosses the meridian becomes a feature collection with one feature per resulting piece.
+
+.. code:: python
+
+  >>> import geojson
+
+  >>> parcel = geojson.Polygon([[(170.0, -10.0), (-170.0, -10.0),
+  ...                           (-170.0, 10.0), (170.0, 10.0),
+  ...                           (170.0, -10.0)]])
+  >>> geojson.dumps(geojson.split_antimeridian(parcel), sort_keys=True)
+  '{"coordinates": [[[[170.0, -10.0], [180.0, -10.0], [180.0, 10.0], [170.0, 10.0], [170.0, -10.0]]], [[[-180.0, -10.0], [-170.0, -10.0], [-170.0, 10.0], [-180.0, 10.0], [-180.0, -10.0]]]], "type": "MultiPolygon"}'
+
 generate_random
 ~~~~~~~~~~~~~~~
 
