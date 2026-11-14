@@ -9,9 +9,8 @@
 from __future__ import annotations
 
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, TypedDict
+from typing import TYPE_CHECKING, Any, Literal, TypedDict
 
-from ..common.exceptions import ELFError
 from ..common.utils import elf_assert, struct_parse
 from .dynamic import DynamicSection
 from .sections import Section, Symbol
@@ -24,12 +23,71 @@ if TYPE_CHECKING:
     from .elffile import ELFFile
     from .sections import StringTableSection, SymbolTableSection
 
+#: Where a symbol version index was found.
+#:
+#: ``definition`` means the exporting object defines the version,
+#: ``requirement`` means the importing object requires it from ``filename``.
+VersionKind = Literal['definition', 'requirement']
+
 
 class SymbolVersion(TypedDict):
     index: str | int
     name: str | None
     filename: str | None
     hidden: bool
+
+
+class SymbolIdentity(TypedDict):
+    """A symbol identity that is comparable between ELF files.
+
+    ``name``, ``version``, and ``kind`` come from the symbol and its version
+    table. ``filename`` names the provider of a required version.
+    ``is_default`` distinguishes ``foo@@VER_1`` from ``foo@VER_1``; both
+    default and non-default versions of the same spelling are distinct
+    identities, as are an export and an import of that spelling. ``hidden``
+    is the GNU non-default marker from the versym entry.
+
+    For resolved and unversioned symbols, ``file``, ``index``, and
+    ``raw_index`` are None so that the record is independent of the local
+    version-table numbering. When ``resolved`` is False, those fields carry
+    the defining file and the original versym index (including the GNU hidden
+    bit), because an unknown index must not be mistaken for an unversioned
+    symbol. Explicit local/global entries are ``resolved`` with no version;
+    only a numeric index missing from both tables is unresolved.
+    """
+    name: str
+    version: str | None
+    kind: VersionKind | None
+    filename: str | None
+    is_default: bool
+    hidden: bool
+    resolved: bool
+    file: str | None
+    index: str | int | None
+    raw_index: int | str | None
+
+
+class SymbolVersionDetail(TypedDict):
+    """Version lookup result with provenance.
+
+    ``index`` is the version index after removing the GNU hidden bit and
+    ``raw_index`` is the exact versym value. ``file`` is the object containing
+    the symbol, or None when its stream has no name. All three remain present
+    when no definition or requirement matches the index.
+
+    ``resolved`` is True for named versions and for the explicit
+    'VER_NDX_LOCAL'/'VER_NDX_GLOBAL' entries; it is False only when a numeric
+    index has no matching version definition or requirement.
+    """
+    index: str | int
+    name: str | None
+    filename: str | None
+    hidden: bool
+    kind: VersionKind | None
+    is_default: bool
+    resolved: bool
+    file: str | None
+    raw_index: int | str
 
 
 class Version:
@@ -232,6 +290,18 @@ class GNUVerDefSection(GNUVersionSection):
 
         return None
 
+    def is_base_version(self, index: int) -> bool:
+        """ Return True if the definition at ``index`` is the base version.
+
+            The base version has ``VER_FLG_BASE`` set (``vd_flags & 1``).  It
+            names the shared object and is not an ABI version in its own right.
+        """
+        definition = self.get_version(index)
+        if definition is None:
+            return False
+        verdef, _ = definition
+        return bool(verdef['vd_flags'] & 1)
+
 
 class GNUVerSymSection(Section):
     """ ELF SUNW or GNU Versym table section.
@@ -298,13 +368,32 @@ class GNUVerSymSection(Section):
             in this file. hidden is the GNU version-hidden bit, not ELF symbol
             visibility; it is False for Solaris versioning.
 
-            Raise ELFError if a version index has no matching definition or
-            requirement. Resolving versions requires section headers.
+            If a version index has no matching definition or requirement, the
+            result is returned with its original index and no name. Use
+            :meth:`get_symbol_version_detail` to also obtain the source file
+            and raw versym value for that entry.
+
+            Resolving versions requires section headers.
+        """
+        detail = self.get_symbol_version_detail(n)
+        if detail is None:
+            return None
+        return self._legacy_view(detail)
+
+    def get_symbol_version_detail(self, n: int) -> SymbolVersionDetail | None:
+        """ Return the version of symbol #n together with its provenance.
+
+            In addition to the fields returned by :meth:`get_symbol_version`,
+            the result has ``kind`` ('definition' or 'requirement'),
+            ``is_default``, ``resolved``, ``file``, and ``raw_index``. The
+            original ``raw_index`` (including the GNU hidden bit) and ``file``
+            remain present when ``resolved`` is False.
         """
         if not 0 <= n < self.num_symbols():
             return None
 
-        index = self.get_symbol(n)['ndx']
+        raw_index = self.get_symbol(n)['ndx']
+        index = raw_index
         hidden = False
         if isinstance(index, int) and self.is_gnu:
             # GNU uses the high bit as a flag; the remaining bits are the
@@ -316,9 +405,14 @@ class GNUVerSymSection(Section):
             elif index == 1:
                 index = 'VER_NDX_GLOBAL'
 
-        result: SymbolVersion = {
-            'index': index, 'name': None, 'filename': None, 'hidden': hidden}
+        result: SymbolVersionDetail = {
+            'index': index, 'name': None, 'filename': None, 'hidden': hidden,
+            'kind': None, 'is_default': False, 'resolved': False,
+            'file': self._file_name, 'raw_index': raw_index}
         if index in ('VER_NDX_LOCAL', 'VER_NDX_GLOBAL'):
+            # These are explicitly unversioned, not indices that failed to
+            # resolve against a version table.
+            result['resolved'] = True
             return result
 
         # Look up the recorded index, which need not be consecutive or bounded
@@ -328,8 +422,12 @@ class GNUVerSymSection(Section):
                 definition = section.get_version(index)
                 if definition is None:
                     continue
-                _, auxiliaries = definition
+                verdef, auxiliaries = definition
                 result['name'] = next(auxiliaries).name
+                result['kind'] = 'definition'
+                # GNU marks a non-default version in the versym entry, not in
+                # the verdef flags (vd_flags carries VER_FLG_BASE/WEAK/INFO).
+                result['is_default'] = not hidden and not self._is_base(verdef)
             else:
                 needed = section.get_version(index)
                 if needed is None:
@@ -337,9 +435,110 @@ class GNUVerSymSection(Section):
                 requirement, auxiliary = needed
                 result['name'] = auxiliary.name
                 result['filename'] = requirement.name
+                result['kind'] = 'requirement'
+                # An imported version is a default requirement unless its
+                # versym entry is marked non-default (the GNU hidden bit).
+                result['is_default'] = not hidden
+            result['resolved'] = True
             return result
 
-        raise ELFError(f'No version definition or requirement for index {index}')
+        # Keep the raw index in the result. Raising here would discard the
+        # only link back to the versym/file entry, and pretending the symbol is
+        # unversioned would make it look newly added in cross-file reports.
+        return result
+
+    @property
+    def _file_name(self) -> str | None:
+        name = getattr(self.stream, 'name', None)
+        if not isinstance(name, str):
+            return None
+        return name
+
+    @staticmethod
+    def _is_base(verdef: Version) -> bool:
+        return bool(verdef['vd_flags'] & 1)
+
+    @staticmethod
+    def _legacy_view(result: SymbolVersionDetail) -> SymbolVersion:
+        return {
+            'index': result['index'], 'name': result['name'],
+            'filename': result['filename'], 'hidden': result['hidden']}
+
+    def get_symbol_identity_key(
+            self, n: int) -> tuple[str, str | None, VersionKind | None,
+                                   str | None, bool, bool, bool,
+                                   str | None, str | int | None,
+                                   int | str | None] | None:
+        """ Return a hashable identity for symbol #n.
+
+            The key contains the same values as :meth:`get_symbol_identity`,
+            in field order, so it can be used directly as a set or dictionary
+            key when comparing symbol lists from different files.
+        """
+        identity = self.get_symbol_identity(n)
+        if identity is None:
+            return None
+        return (
+            identity['name'], identity['version'], identity['kind'],
+            identity['filename'], identity['is_default'],
+            identity['hidden'],
+            identity['resolved'], identity['file'], identity['index'],
+            identity['raw_index'])
+
+    def get_symbol_identity(self, n: int) -> SymbolIdentity | None:
+        """ Return a stable identity for symbol #n in this section's table.
+
+            Unlike :meth:`get_symbol_version`, the result does not depend on
+            the local version-table index, so it stays equal across adjacent
+            library builds that renumber their ``.gnu.version_d`` or
+            ``.gnu.version_r`` tables. For a default version, ``version`` is
+            its name and ``is_default`` is True; a non-default (``@``)
+            version has ``is_default`` False. A required version also carries
+            the providing ``filename``.
+
+            An index with no matching definition or requirement is returned
+            with ``resolved`` false and the original ``index``, rather than
+            being reported as an unversioned symbol. ``hidden`` remains the
+            GNU non-default bit, which keeps it distinct from a default
+            version of the same name.
+        """
+        if not 0 <= n < self.num_symbols():
+            return None
+
+        symbol = self.get_symbol(n)
+        version = self.get_symbol_version_detail(n)
+        assert version is not None
+        resolved = version['resolved']
+        identity: SymbolIdentity = {
+            'name': symbol.name,
+            'version': version['name'],
+            'kind': version['kind'],
+            'filename': version['filename'],
+            'is_default': version['is_default'],
+            'hidden': version['hidden'],
+            'resolved': resolved,
+            'file': version['file'] if not resolved else None,
+            'index': version['index'] if not resolved else None,
+            'raw_index': version['raw_index'] if not resolved else None,
+        }
+        return identity
+
+    def iter_symbol_identities(self) -> Iterator[SymbolIdentity]:
+        """ Yield stable identities for all defined or required symbols.
+
+            Local and unversioned global symbols are skipped. Two entries with
+            the same spelling are yielded separately when their version
+            identity differs, for example one export and one import, or a
+            default and a non-default version.
+        """
+        for i in range(self.num_symbols()):
+            version = self.get_symbol_version_detail(i)
+            if version is None or version['index'] in (
+                    'VER_NDX_LOCAL', 'VER_NDX_GLOBAL'):
+                continue
+            identity = self.get_symbol_identity(i)
+            assert identity is not None
+            yield identity
 
     def iter_symbols(self) -> Iterator[Symbol]:
         """ Yield all the symbols in the table

@@ -125,6 +125,135 @@ class TestSymbolVersioning(unittest.TestCase):
                 'index': 2, 'name': 'SYSVABI_1.3',
                 'filename': 'libc.so.1', 'hidden': False})
 
+    def _identities_by_key(self, versym, name):
+        return [
+            identity for identity in versym.iter_symbol_identities()
+            if identity['name'] == name]
+
+    def test_symbol_identities_keep_direction_and_defaultness(self):
+        with open(os.path.join('test', 'testfiles_for_unittests',
+                               'lib_versioned64.so.elf'), 'rb') as f:
+            elf = ELFFile(f)
+            versym = elf.get_section_by_name('.gnu.version')
+
+            puts = self._identities_by_key(versym, 'puts')
+            self.assertEqual(len(puts), 1)
+            self.assertEqual(puts[0], {
+                'name': 'puts', 'version': 'GLIBC_2.2.5',
+                'kind': 'requirement', 'filename': 'libc.so.6',
+                'is_default': True, 'hidden': False, 'resolved': True,
+                'file': None, 'index': None, 'raw_index': None})
+
+            # The same spelling is exported twice: once as a non-default
+            # (single @) version and once as the default (@@) version.
+            function1 = self._identities_by_key(versym, 'function1')
+            self.assertEqual(len(function1), 2)
+            self.assertEqual(
+                {(v['version'], v['is_default']) for v in function1},
+                {('VER_1.2', False), ('VER_1.0', True)})
+            self.assertTrue(all(v['kind'] == 'definition'
+                                for v in function1))
+            self.assertTrue(all(v['filename'] is None
+                                for v in function1))
+
+            # An export and an import with the same spelling remain separate
+            # identities because their direction differs.
+            self.assertEqual(
+                {identity['kind'] for identity in
+                 versym.iter_symbol_identities() if identity['name'] == 'puts'},
+                {'requirement'})
+
+            self.assertEqual(
+                versym.get_symbol_identity_key(15),
+                ('function1', 'VER_1.2', 'definition', None, False, True,
+                 True, None, None, None))
+            self.assertEqual(
+                versym.get_symbol_identity_key(17),
+                ('function1', 'VER_1.0', 'definition', None, True, False,
+                 True, None, None, None))
+            self.assertIsNone(versym.get_symbol_identity_key(-1))
+            self.assertIsNone(
+                versym.get_symbol_identity_key(versym.num_symbols()))
+
+    def test_identity_is_stable_when_version_table_is_renumbered(self):
+        with open(os.path.join('test', 'testfiles_for_unittests',
+                               'lib_versioned64.so.elf'), 'rb') as f:
+            stream = BytesIO(f.read())
+
+        def identities(stream):
+            elf = ELFFile(stream)
+            versym = elf.get_section_by_name('.gnu.version')
+            return {(
+                i['name'], i['version'], i['kind'], i['filename'],
+                i['is_default']): i for i in versym.iter_symbol_identities()}
+
+        original = identities(BytesIO(stream.getvalue()))
+        self.assertEqual(original[('function1', 'VER_1.2', 'definition',
+                                   None, False)]['resolved'], True)
+
+        # Renumber both the verdef index and the versym reference. The symbol
+        # is unchanged; only its local table index moved.
+        elf = ELFFile(stream)
+        verdef = elf.get_section_by_name('.gnu.version_d')
+        versym = elf.get_section_by_name('.gnu.version')
+        offset = verdef['sh_offset']
+        old_index = None
+        for version, _ in verdef.iter_versions():
+            if version['vd_ndx'] == 4:
+                old_index = version['vd_ndx']
+                stream.seek(offset + 4)  # Elf_Verdef.vd_ndx
+                stream.write(struct.pack('<H', 42))
+                break
+            offset += version['vd_next']
+        self.assertIsNotNone(old_index)
+        # Every versym entry that referenced the old index must move with it.
+        new_index = 42
+        for n in range(versym.num_symbols()):
+            offset = versym['sh_offset'] + n * versym['sh_entsize']
+            stream.seek(offset)
+            raw = struct.unpack('<H', stream.read(2))[0]
+            if raw & 0x7fff == old_index:
+                stream.seek(offset)
+                stream.write(struct.pack('<H', new_index | (raw & 0x8000)))
+
+        renumbered = identities(BytesIO(stream.getvalue()))
+        self.assertEqual(renumbered, original)
+
+    def test_unresolved_version_index_keeps_origin(self):
+        class NamedBytesIO(BytesIO):
+            name = 'lib_versioned64.so.elf'
+
+        with open(os.path.join('test', 'testfiles_for_unittests',
+                               'lib_versioned64.so.elf'), 'rb') as f:
+            stream = NamedBytesIO(f.read())
+
+        elf = ELFFile(stream)
+        versym = elf.get_section_by_name('.gnu.version')
+        # Point symbol 17 at an index with no verdef/verneed entry.
+        stream.seek(versym['sh_offset'] + 17 * versym['sh_entsize'])
+        stream.write(struct.pack('<H', 99))
+
+        elf = ELFFile(stream)
+        versym = elf.get_section_by_name('.gnu.version')
+        detail = versym.get_symbol_version_detail(17)
+        self.assertEqual(detail['index'], 99)
+        self.assertEqual(detail['raw_index'], 99)
+        self.assertFalse(detail['resolved'])
+        self.assertIsNone(detail['name'])
+        self.assertNotIn(detail['index'], ('VER_NDX_LOCAL', 'VER_NDX_GLOBAL'))
+        self.assertEqual(detail['file'], 'lib_versioned64.so.elf')
+
+        identity = versym.get_symbol_identity(17)
+        self.assertEqual(identity['index'], 99)
+        self.assertEqual(identity['raw_index'], 99)
+        self.assertFalse(identity['resolved'])
+        self.assertIsNone(identity['version'])
+        self.assertIsNone(identity['kind'])
+        self.assertEqual(identity['file'], 'lib_versioned64.so.elf')
+        # The legacy lookup also remains traceable instead of raising.
+        self.assertEqual(versym.get_symbol_version(17), {
+            'index': 99, 'name': None, 'filename': None, 'hidden': False})
+
     verneed_reference_data: ClassVar = [
         {'name': 'libz.so.1', 'vn_version': 1, 'vn_cnt': 1,
          'vernaux': [
