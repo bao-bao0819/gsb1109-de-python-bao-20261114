@@ -2,7 +2,7 @@ from . import cli, exceptions, formats, time
 from .common import VERSION, Alignment, Color
 from .exceptions import *
 from .formats import whisper
-from .ssaevent import SSAEvent
+from .ssaevent import DisplayChar, SSAEvent
 from .ssafile import SSAFile
 from .ssastyle import SSAStyle
 
@@ -10,6 +10,7 @@ __all__ = [
     "VERSION",
     "Alignment",
     "Color",
+    "DisplayChar",
     "SSAEvent",
     "SSAFile",
     "SSAStyle",

@@ -62,6 +62,9 @@ Misc methods
 .. autoclass:: pysubs2.SSAEvent
    :members:
 
+.. autoclass:: pysubs2.DisplayChar
+   :members:
+
 ``SSAStyle`` --- a subtitle style
 ---------------------------------
 
