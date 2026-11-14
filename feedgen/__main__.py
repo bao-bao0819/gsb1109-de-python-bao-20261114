@@ -22,6 +22,9 @@ File options:
   <file>.atom      -- Generate ATOM test feed
   <file>.rss       -- Generate RSS test teed
 
+Compare options:
+  diff ATOM RSS    -- Compare an ATOM and an RSS document
+
 Stdout options:
   atom             -- Generate ATOM test output
   rss              -- Generate RSS test output
@@ -46,6 +49,10 @@ def print_enc(s):
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == 'diff':
+        from feedgen.parity import main as diff_main
+        sys.exit(diff_main(sys.argv[2:]))
+
     if len(sys.argv) != 2 or not (
             sys.argv[1].endswith('rss') or
             sys.argv[1].endswith('atom') or

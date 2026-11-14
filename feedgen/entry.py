@@ -136,18 +136,18 @@ class FeedEntry(object):
 
         _add_text_elm(entry, self.__atom_content, 'content')
 
-        for link in self.__atom_link or []:
-            link = xml_elem('link', entry, href=link['href'])
-            if link.get('rel'):
-                link.attrib['rel'] = link['rel']
-            if link.get('type'):
-                link.attrib['type'] = link['type']
-            if link.get('hreflang'):
-                link.attrib['hreflang'] = link['hreflang']
-            if link.get('title'):
-                link.attrib['title'] = link['title']
-            if link.get('length'):
-                link.attrib['length'] = link['length']
+        for data in self.__atom_link or []:
+            link = xml_elem('link', entry, href=data['href'])
+            if data.get('rel'):
+                link.attrib['rel'] = data['rel']
+            if data.get('type'):
+                link.attrib['type'] = data['type']
+            if data.get('hreflang'):
+                link.attrib['hreflang'] = data['hreflang']
+            if data.get('title'):
+                link.attrib['title'] = data['title']
+            if data.get('length'):
+                link.attrib['length'] = data['length']
 
         _add_text_elm(entry, self.__atom_summary, 'summary')
 

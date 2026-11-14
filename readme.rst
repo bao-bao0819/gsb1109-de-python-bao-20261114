@@ -171,6 +171,63 @@ pass the classes for the feed and the entry extension to this method meaning
 that you can define them everywhere.
 
 
+-----------------------------
+Compare ATOM and RSS Output
+-----------------------------
+
+The same feed usually looks different in ATOM and RSS because the two formats
+do not share a one-to-one field mapping.  The parity view compares the two
+actual documents, matches entries by their stable identifier
+(``atom:id``/``rss:guid``) and reports:
+
+- values that are equivalent in both documents,
+- values that only occur in the ATOM or only in the RSS document,
+- values that were collapsed into a single value (for example multiple
+  authors or enclosures that RSS cannot represent).
+
+Links are compared per relationship role, so two links with the same URL and
+MIME type are still distinct when one is ``alternate`` and the other is
+``self``.  Author lists are compared by identity, not position: a different
+order is not reported as missing authors, while a shortened list names the
+missing authors.  Entries without a stable identifier are listed separately.
+
+.. code-block:: python
+
+    from feedgen.parity import build_parity_view
+
+    report = build_parity_view(atom_xml, rss_xml)
+    print(report.format())
+
+    # Values present in both documents:
+    report['http://example.com/entry/1']['equivalent']
+
+    # Values only present in one document:
+    report['http://example.com/entry/1']['atom_only']
+    report['http://example.com/entry/1']['rss_only']
+
+    # Values collapsed to a single value:
+    report['http://example.com/entry/1']['collapsed']
+
+    # Entries without an atom:id/rss:guid:
+    report.unidentified['atom']
+    report.unidentified['rss']
+
+The report is also available directly from a generator:
+
+.. code-block:: python
+
+    report = fg.parity()
+    report = fg.parity_view()
+    report = fg.diff_view()
+
+For command line use, pass the two files to the module:
+
+.. code-block:: console
+
+    $ python -m feedgen.parity atom.xml rss.xml
+    $ python -m feedgen.parity atom.xml rss.xml --json
+
+
 ---------------------
 Testing the Generator
 ---------------------

@@ -13,6 +13,7 @@ Contents:
    api.feed
    api.entry
    api.util
+   api.parity
    ext/api.ext.base
    ext/api.ext.dc
    ext/api.ext.podcast

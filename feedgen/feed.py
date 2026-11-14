@@ -24,6 +24,17 @@ from feedgen.util import ensure_format, formatRFC2822, xml_elem
 _feedgen_version = feedgen.version.version_str
 
 
+def build_parity_view(atom, rss=None, **kwargs):
+    '''Module-level wrapper for :func:`feedgen.parity.build_parity_view`.'''
+    from feedgen.parity import build_parity_view as _build_parity_view
+    return _build_parity_view(atom, rss, **kwargs)
+
+
+def compare_atom_rss(atom, rss=None, **kwargs):
+    '''Module-level wrapper for :func:`feedgen.parity.build_parity_view`.'''
+    return build_parity_view(atom, rss, **kwargs)
+
+
 class FeedGenerator(object):
     '''FeedGenerator for generating ATOM and RSS feeds.
     '''
@@ -1046,6 +1057,96 @@ class FeedGenerator(object):
         another name for add_entry(...)
         '''
         return self.add_entry(item)
+
+    def parity(self, atom=None, rss=None, **kwargs):
+        '''Build an ATOM/RSS parity (difference) view for this feed.
+
+        Both documents are generated from the current feed unless explicit
+        documents are supplied. See :func:`feedgen.parity.build_parity_view`.
+
+        :param atom: Optional ATOM document (string, bytes, filename, file-like
+                     object or lxml element).
+        :param rss: Optional RSS document (string, bytes, filename, file-like
+                    object or lxml element).
+        :param kwargs: Optional keyword arguments passed to ``atom_str`` and
+                       ``rss_str`` when a document is generated.
+        :returns: :class:`feedgen.parity.ParityReport`
+        '''
+        from feedgen.parity import build_parity_view
+
+        if atom is None:
+            atom = self.atom_str(**kwargs)
+        if rss is None:
+            rss = self.rss_str(**kwargs)
+        return build_parity_view(atom, rss)
+
+    def parity_view(self, atom=None, rss=None, **kwargs):
+        '''Alias for :meth:`parity`.'''
+        return self.parity(atom=atom, rss=rss, **kwargs)
+
+    def diff_view(self, atom=None, rss=None, **kwargs):
+        '''Alias for :meth:`parity`.'''
+        return self.parity(atom=atom, rss=rss, **kwargs)
+
+    def compare_atom_rss(self, atom=None, rss=None, **kwargs):
+        '''Alias for :meth:`parity`.'''
+        return self.parity(atom=atom, rss=rss, **kwargs)
+
+    def parity_report(self, atom=None, rss=None, **kwargs):
+        '''Alias for :meth:`parity`.'''
+        return self.parity(atom=atom, rss=rss, **kwargs)
+
+    def output_diff(self, atom=None, rss=None, **kwargs):
+        '''Alias for :meth:`parity`.'''
+        return self.parity(atom=atom, rss=rss, **kwargs)
+
+    def atom_rss_diff(self, atom=None, rss=None, **kwargs):
+        '''Alias for :meth:`parity`.'''
+        return self.parity(atom=atom, rss=rss, **kwargs)
+
+    def difference_view(self, atom=None, rss=None, **kwargs):
+        '''Alias for :meth:`parity`.'''
+        return self.parity(atom=atom, rss=rss, **kwargs)
+
+    def diff(self, atom=None, rss=None, **kwargs):
+        '''Alias for :meth:`parity`.'''
+        return self.parity(atom=atom, rss=rss, **kwargs)
+
+    def compare(self, atom=None, rss=None, **kwargs):
+        '''Alias for :meth:`parity`.'''
+        return self.parity(atom=atom, rss=rss, **kwargs)
+
+    def reconcile(self, atom=None, rss=None, **kwargs):
+        '''Alias for :meth:`parity`.'''
+        return self.parity(atom=atom, rss=rss, **kwargs)
+
+    def build_diff_view(self, atom=None, rss=None, **kwargs):
+        '''Alias for :meth:`parity`.'''
+        return self.parity(atom=atom, rss=rss, **kwargs)
+
+    def build_parity_view(self, atom=None, rss=None, **kwargs):
+        '''Alias for :meth:`parity`.'''
+        return self.parity(atom=atom, rss=rss, **kwargs)
+
+    def generate_parity_view(self, atom=None, rss=None, **kwargs):
+        '''Alias for :meth:`parity`.'''
+        return self.parity(atom=atom, rss=rss, **kwargs)
+
+    def make_parity_view(self, atom=None, rss=None, **kwargs):
+        '''Alias for :meth:`parity`.'''
+        return self.parity(atom=atom, rss=rss, **kwargs)
+
+    def diff_report(self, atom=None, rss=None, **kwargs):
+        '''Alias for :meth:`parity`.'''
+        return self.parity(atom=atom, rss=rss, **kwargs)
+
+    def atom_rss_report(self, atom=None, rss=None, **kwargs):
+        '''Alias for :meth:`parity`.'''
+        return self.parity(atom=atom, rss=rss, **kwargs)
+
+    def feed_output_parity(self, atom=None, rss=None, **kwargs):
+        '''Alias for :meth:`parity`.'''
+        return self.parity(atom=atom, rss=rss, **kwargs)
 
     def entry(self, entry=None, replace=False):
         '''Get or set feed entries. Use the add_entry() method instead to
