@@ -193,3 +193,23 @@ interpreted in a special manner. **pyelftools** attempts to provide a
 convenient Pythonic API for this information whenever possible. There\'s
 no way around it - to even understand the API one must have some grasp
 of the [DWARF standard](https://dwarfstd.org/).
+
+### Code coverage from range lists
+
+Linker section reordering can scatter one compilation unit over several
+distant address regions, so coverage can\'t be taken from the minimum and
+maximum addresses in a unit. The module `elftools/dwarf/coverage.py`
+parses both `.debug_ranges` (DWARF <= 4) and `.debug_rnglists`
+(DWARF 5) range lists into `SourceInterval` objects, each a half-open
+`[begin_address, end_address)` span carrying its originating CU and DIE.
+
+Relative entries are interpreted against the base address in force at
+their position in the list - the CU\'s `DW_AT_low_pc`/`DW_AT_entry_pc`
+first, then each base-address selection entry replaces it for subsequent
+entries; absolute DWARF 5 entries need no base. `merge_adjacent`
+coalesces touching intervals of one source while keeping the original
+range-list entries reachable through `SourceInterval.raw_entries`. The
+`CoverageReport` class then answers both accounting views:
+`total_size` unions all spans so a byte covered by two units counts
+once, while `by_unit`/`per_unit_size` keep both attributions. See
+the [coverage example](../examples/dwarf_coverage.py).

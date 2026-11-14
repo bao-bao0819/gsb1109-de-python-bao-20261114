@@ -1,0 +1,10 @@
+Processing file: ./examples/sample_exe64.elf
+  CU ../sysdeps/x86_64/elf/start.S (.debug_info offset 0x0): 1 span(s), 42 byte(s)
+    [0x400400, 0x40042a)
+  CU z.c (.debug_info offset 0x102): 1 span(s), 43 byte(s)
+    [0x4004ec, 0x400517)
+  CU elf-init.c (.debug_info offset 0x1a2): 1 span(s), 153 byte(s)
+    [0x400520, 0x4005b9)
+  Total covered (overlapping bytes counted once): 238 byte(s) in 3 span(s)
+  Sum of per-unit attributions: 238 byte(s)
+  Bytes attributed to more than one unit: 0
