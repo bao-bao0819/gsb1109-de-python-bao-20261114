@@ -95,6 +95,13 @@ class FeedEntry(object):
         self.__rss_source = None
         self.__rss_title = None
 
+        # Track whether the Atom id and RSS guid were set explicitly. This
+        # allows a migrated entry to keep the historical RSS guid while
+        # exposing a new Atom id without the two fields overwriting each
+        # other, while retaining the historical mirroring behaviour.
+        self.__atom_id_explicit = False
+        self.__rss_guid_explicit = False
+
         # Extension list:
         self.__extensions = {}
         self.__extensions_register = {}
@@ -273,33 +280,132 @@ class FeedEntry(object):
             self.__rss_title = title
         return self.__atom_title
 
-    def id(self, id=None):
+    def id(self, id=None, guid=None, permalink=False):
         '''Get or set the entry id which identifies the entry using a
         universally unique and permanent URI. Two entries in a feed can have
         the same value for id if they represent the same entry at different
-        points in time. This method will also set rss:guid with permalink set
-        to False. Id is mandatory for an ATOM entry.
+        points in time. Id is mandatory for an ATOM entry.
+
+        If no RSS guid has been set explicitly, this will also set rss:guid
+        with permalink set to False. If a legacy RSS guid was set explicitly,
+        it is preserved so that a migrated entry can expose a new Atom id while
+        keeping the historical guid its subscribers already know.
+
+        The optional *guid* argument sets both identifiers in one call, which
+        is the explicit form used for migrations::
+
+            entry.id('new-atom-id', guid='old-rss-guid')
 
         :param id: New Id of the entry.
+        :param guid: Optional historical RSS guid to keep in parallel.
+        :param permalink: Permalink flag for *guid*.
         :returns: Id of the entry.
         '''
         if id is not None:
             self.__atom_id = id
-            self.__rss_guid = {'guid': id, 'permalink': False}
+            self.__atom_id_explicit = True
+            if not self.__rss_guid_explicit:
+                self.__rss_guid = {'guid': id, 'permalink': False}
+        if guid is not None:
+            self.__rss_guid = {'guid': guid, 'permalink': permalink}
+            self.__rss_guid_explicit = True
         return self.__atom_id
 
-    def guid(self, guid=None, permalink=False):
+    def guid(self, guid=None, permalink=False, id=None, atom_id=None):
         '''Get or set the entries guid which is a string that uniquely
-        identifies the item. This will also set atom:id.
+        identifies the item. If no Atom id has been set explicitly, this will
+        also set atom:id.
+
+        Calling both id(...) and guid(...) explicitly keeps the two values
+        separate, regardless of the order in which they are called. This is
+        used for migrations where the historical RSS guid must survive while
+        the Atom feed uses a new permanent id.
+
+        For convenience, the new Atom id can also be passed in the same call::
+
+            entry.guid('old-rss-guid', id='new-atom-id')
 
         :param guid: Id of the entry.
         :param permalink: If this is a permanent identifier for this item
+        :param id: Optional new Atom id to set in parallel.
+        :param atom_id: Alias for *id*.
         :returns: Id and permalink setting of the entry.
         '''
+        if atom_id is not None:
+            id = atom_id
         if guid is not None:
-            self.__atom_id = guid
             self.__rss_guid = {'guid': guid, 'permalink': permalink}
+            self.__rss_guid_explicit = True
+            if not self.__atom_id_explicit:
+                self.__atom_id = guid
+        if id is not None:
+            self.__atom_id = id
+            self.__atom_id_explicit = True
         return self.__rss_guid
+
+    def legacy_guid(self, guid=None, permalink=False):
+        '''Get or set the historical RSS guid of the entry.
+
+        Setting this preserves an explicitly set Atom id. The getter returns
+        the guid string (unlike :meth:`guid`, which returns the full dict
+        including ``permalink``).
+
+        :param guid: Historical RSS guid of the entry.
+        :param permalink: If this is a permanent identifier for this item
+        :returns: Historical RSS guid of the entry.
+        '''
+        if guid is not None:
+            self.guid(guid, permalink)
+        return self.__rss_guid.get('guid')
+
+    def old_guid(self, guid=None, permalink=False):
+        '''Alias for :meth:`legacy_guid`.'''
+        return self.legacy_guid(guid, permalink)
+
+    def rss_guid(self, guid=None, permalink=False):
+        '''Alias for :meth:`guid` returning the full guid data.'''
+        return self.guid(guid, permalink)
+
+    def atom_id(self, id=None, guid=None, permalink=False):
+        '''Get or set only the Atom id of the entry.
+
+        :param id: New Atom id of the entry.
+        :param guid: Optional historical RSS guid to keep in parallel.
+        :param permalink: Permalink flag for *guid*.
+        :returns: Atom id of the entry.
+        '''
+        return self.id(id, guid, permalink)
+
+    def has_explicit_id(self):
+        '''Return whether an Atom id was set explicitly on this entry.'''
+        return self.__atom_id_explicit
+
+    def has_explicit_guid(self):
+        '''Return whether an RSS guid was set explicitly on this entry.'''
+        return self.__rss_guid_explicit
+
+    def remap_id(self, id=None, guid=None, permalink=False):
+        '''Set a new Atom id while preserving a historical RSS guid.
+
+        Both values are marked as explicit in one operation, so the order in
+        which migration records are applied cannot change the result. If
+        *guid* is omitted, the current RSS guid is kept.
+
+        :param id: New Atom id of the entry.
+        :param guid: Historical RSS guid of the entry.
+        :param permalink: If the historical guid is a permanent identifier.
+        :returns: Tuple of Atom id and RSS guid data.
+        '''
+        if guid is None:
+            guid = self.__rss_guid.get('guid')
+            permalink = self.__rss_guid.get('permalink', False)
+        if id is not None:
+            self.__atom_id = id
+            self.__atom_id_explicit = True
+        if guid is not None:
+            self.__rss_guid = {'guid': guid, 'permalink': permalink}
+            self.__rss_guid_explicit = True
+        return self.__atom_id, self.__rss_guid
 
     def updated(self, updated=None):
         '''Set or get the updated value which indicates the last time the entry

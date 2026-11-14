@@ -12,6 +12,7 @@ Contents:
 
    api.feed
    api.entry
+   api.migration
    api.util
    ext/api.ext.base
    ext/api.ext.dc

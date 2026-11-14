@@ -32,6 +32,10 @@ Stdout options:
   syndication.rss  -- Generate syndication extension test output (rss format)
   torrent          -- Generate Torrent test output
 
+Migration options:
+  guid-mappings <file>... -- Resolve legacy RSS guid to Atom id mappings
+                             and print the plan, including conflict groups
+
 '''
 
 
@@ -46,6 +50,10 @@ def print_enc(s):
 
 
 def main():
+    if len(sys.argv) >= 3 and sys.argv[1] == 'guid-mappings':
+        from feedgen.migration import main as migration_main
+        return migration_main(sys.argv[2:])
+
     if len(sys.argv) != 2 or not (
             sys.argv[1].endswith('rss') or
             sys.argv[1].endswith('atom') or
@@ -147,4 +155,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())

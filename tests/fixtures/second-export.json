@@ -1,0 +1,3 @@
+[{"old_guid": "legacy-3", "new_id": "https://example.com/posts/2"},
+ {"old_guid": "legacy-4", "new_id": "https://example.com/posts/3"},
+ {"old_guid": "legacy-2", "new_id": "https://example.com/posts/conflict"}]

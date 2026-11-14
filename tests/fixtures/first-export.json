@@ -1,0 +1,3 @@
+[{"legacy_guid": "legacy-1", "atom_id": "https://example.com/posts/1", "link": "https://example.com/posts/1"},
+ {"legacy_guid": "legacy-2", "atom_id": "https://example.com/posts/1"},
+ {"legacy_guid": "legacy-3", "atom_id": "https://example.com/posts/2", "link": "https://example.com/shared"}]

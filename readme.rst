@@ -105,10 +105,70 @@ The FeedGenerator's method `add_entry(...)` will generate a new FeedEntry
 object, automatically append it to the feeds internal list of entries and
 return it, so that additional data can be added.
 
+--------------------
+Migrate RSS to Atom
+--------------------
+
+When an existing RSS feed is replaced by Atom, downstream readers often treat
+every historical article as new because the identifier changed. Keep an
+explicit mapping from the historical RSS guid to the new Atom id instead of
+guessing by link:
+
+.. code-block:: python
+
+    from feedgen.feed import FeedGenerator
+    from feedgen.migration import resolve_mappings
+
+    # Each record may use legacy_guid/atom_id, old_guid/new_id, or a simple
+    # {"old-guid": "new-id"} dictionary.
+    plan = resolve_mappings(
+        {'old-guid-1': 'https://example.com/posts/1'},
+        [{'legacy_guid': 'old-guid-2',
+          'atom_id': 'https://example.com/posts/2'}],
+    )
+    print(plan.conflict_report())
+
+    fg = FeedGenerator()
+    ...
+    fe = fg.add_entry()
+    fe.title('A historical article')
+    fe.id('https://example.com/posts/1')    # new Atom id
+    fe.legacy_guid('old-guid-1')            # historical RSS guid
+
+The entry keeps both values: ``atom_str`` emits the new ``<id>`` while
+``rss_str`` emits the historical ``<guid>``. Calling ``id(...)`` and
+``guid(...)`` in either order gives the same result.
+
+The whole mapping can also be applied to a feed. Entries are matched by their
+existing Atom id or RSS guid. ``link_hint=True`` allows a link to be used as a
+fallback for an otherwise unidentified entry, but a link is never treated as
+proof of identity because a repost can share the original link:
+
+.. code-block:: python
+
+    plan = fg.apply_guid_mappings(
+        'first-export.json',
+        'second-export.csv',
+        link_hint=True,
+    )
+    for conflict in plan.conflict_groups:
+        print(conflict)  # one group per historical guid that was claimed twice
+
+If two migration materials claim different new Atom ids for the same
+historical guid, that guid is reported as a conflict group and is not
+published. Every other agreed mapping is still applied. Because resolution
+sorts by identifiers rather than input order, reversing the order of the
+materials cannot change the resulting article count.
+
+A resolved plan can be inspected from the command line:
+
+.. code-block:: console
+
+    $ python -m feedgen.migration first.json second.json
+
 ----------
 Extensions
 ----------
-
 The FeedGenerator supports extensions to include additional data into the XML
 structure of the feeds. Extensions can be loaded like this:
 

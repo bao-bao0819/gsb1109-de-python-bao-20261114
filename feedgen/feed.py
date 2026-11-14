@@ -1047,6 +1047,136 @@ class FeedGenerator(object):
         '''
         return self.add_entry(item)
 
+    def resolve_guid_mappings(self, *sources, **kwargs):
+        '''Resolve explicit old RSS guid to new Atom id mappings.
+
+        This method only resolves the supplied migration materials; it does
+        not modify the feed. Conflict groups are reported in the returned
+        plan while every other mapping remains accepted. See
+        :func:`feedgen.migration.resolve_mappings` for the accepted input
+        shapes.
+
+        :param sources: One or more migration materials.
+        :param strict: Raise on conflicts instead of only reporting them.
+        :returns: :class:`feedgen.migration.MappingPlan`
+        '''
+        from feedgen.migration import resolve_mappings
+        return resolve_mappings(*sources, **kwargs)
+
+    def apply_guid_mappings(self, *sources, **kwargs):
+        '''Apply explicit old RSS guid to new Atom id mappings to entries.
+
+        Entries are matched by an explicit identifier first (their current
+        Atom id or RSS guid). A shared link is only a hint: set
+        ``link_hint=True`` to allow a unique link to identify an entry that
+        has no identifier at all. An explicit but unmapped identifier is never
+        overridden by a link, because a repost can share the original link.
+
+        For each matched entry the historical RSS guid is preserved for
+        ``rss_str``/``rss_file`` while the new Atom id is used for
+        ``atom_str``/``atom_file``. Conflicting historical guids are not
+        applied, but all other accepted mappings are.
+
+        :param sources: One or more migration materials.
+        :param link_hint: Use a unique link as a fallback match.
+        :returns: :class:`feedgen.migration.MappingPlan` including applied
+            mappings and any conflict groups.
+        '''
+        from dataclasses import replace
+        from feedgen.migration import (AppliedGuidMapping, RejectedGuidMapping,
+                                       resolve_mappings)
+
+        link_hint = kwargs.pop('link_hint', False)
+        strict = kwargs.pop('strict', False)
+        if kwargs:
+            raise TypeError('Unexpected keyword arguments: %s'
+                            % ', '.join(sorted(kwargs)))
+        plan = resolve_mappings(*sources, strict=strict)
+        applied = []
+        rejected = []
+        unmatched = set(plan.articles)
+        conflicted = {conflict.legacy_guid for conflict in plan.conflicts}
+
+        # A link is a hint, never identity. Only use it for an entry that has
+        # no matching identifier, and only when exactly one article claims it.
+        articles_by_link = {}
+        if link_hint:
+            for atom_id in sorted(plan.articles):
+                article = plan.articles[atom_id]
+                for link in article.links:
+                    articles_by_link.setdefault(link, []).append(article)
+
+        matches = []
+        for index, entry in enumerate(self.__feed_entries):
+            atom_id = entry.id()
+            guid_data = entry.guid()
+            rss_guid = guid_data.get('guid')
+            target = None
+            if atom_id in plan.articles:
+                target = plan.articles[atom_id]
+            elif atom_id in plan.mappings:
+                target = plan.articles[plan.mappings[atom_id].atom_id]
+            elif rss_guid in plan.mappings:
+                target = plan.articles[plan.mappings[rss_guid].atom_id]
+            elif link_hint and not entry.has_explicit_id() \
+                    and not entry.has_explicit_guid():
+                links = [entry_link.get('href')
+                         for entry_link in entry.link() or []
+                         if entry_link.get('href')]
+                for link in sorted(set(links)):
+                    candidates = articles_by_link.get(link, [])
+                    if len(candidates) == 1:
+                        target = candidates[0]
+                        break
+            if target is None:
+                for guid in (rss_guid, atom_id):
+                    if guid in conflicted:
+                        conflict = next(
+                            item for item in plan.conflicts
+                            if item.legacy_guid == guid)
+                        rejected.append(RejectedGuidMapping(
+                            legacy_guid=guid, atom_ids=conflict.atom_ids,
+                            entry_index=index))
+                        break
+                continue
+            matches.append((index, entry, target, guid_data))
+
+        # Apply in a fixed order so nothing depends on the order of entries.
+        for index, entry, target, guid_data in sorted(
+                matches, key=lambda item: (item[2].atom_id, item[0])):
+            rss_guid = guid_data.get('guid')
+            legacy_guid = rss_guid if rss_guid in target.legacy_guids \
+                else target.legacy_guids[0]
+            entry.remap_id(target.atom_id, legacy_guid,
+                           guid_data.get('permalink', False))
+            unmatched.discard(target.atom_id)
+            applied.append(AppliedGuidMapping(
+                atom_id=target.atom_id, legacy_guid=legacy_guid,
+                entry_index=index, previous_guid=rss_guid))
+
+        return replace(plan, applied=tuple(applied), rejected=tuple(rejected),
+                       unmatched=tuple(sorted(unmatched)))
+
+    def guid_mappings(self, *sources):
+        '''Alias for :meth:`apply_guid_mappings`.'''
+        return self.apply_guid_mappings(*sources)
+
+    def migrate_guids(self, *sources, **kwargs):
+        '''Alias for :meth:`apply_guid_mappings`.'''
+        return self.apply_guid_mappings(*sources, **kwargs)
+
+    def apply_mappings(self, *sources, **kwargs):
+        '''Alias for :meth:`apply_guid_mappings`.'''
+        return self.apply_guid_mappings(*sources, **kwargs)
+
+    def resolve_mappings(self, *sources):
+        '''Alias for :meth:`resolve_guid_mappings`.'''
+        return self.resolve_guid_mappings(*sources)
+
+    def map_guids(self, *sources, **kwargs):
+        '''Alias for :meth:`apply_guid_mappings`.'''
+        return self.apply_guid_mappings(*sources, **kwargs)
+
     def entry(self, entry=None, replace=False):
         '''Get or set feed entries. Use the add_entry() method instead to
         automatically create the FeedEntry objects.
