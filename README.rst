@@ -106,7 +106,7 @@ Here's a sample program
     position.market_value
 
   # Security
-  
+
   security = transaction.security
   # or
   security = position.security
@@ -114,7 +114,72 @@ Here's a sample program
   security.name
   security.ticker
   security.memo
-  
+
+Versioned Security Dictionary
+==============================
+
+Brokerages recode the same listed security, and a delisted company's ticker
+can be reused by an unrelated new company.  The
+:class:`ofxparse.SecurityDictionary` combines one or more OFX security lists
+with dated, manually curated mappings into a versioned dictionary that
+resolves the identity of a holding on a specific trading day.
+
+Identity rules:
+
+* The OFX ``UNIQUEID`` (normally a CUSIP) is the only identity key.  Sharing a
+  ticker or a name never merges two securities.
+* A manual mapping is a dated edge (``valid_from`` plus an optional
+  ``valid_to``); it only applies to dates inside its closed interval.
+* Holding dates are snapped to a trading day with a built-in US equity
+  calendar (weekends and market holidays).
+* When two individually legal mappings let one identity reach two different
+  securities on the same day, both conflict chains are retained.  The result
+  is flagged ambiguous, a deterministic candidate is still offered, and dates
+  without a fork keep resolving unambiguously.
+
+.. code:: python
+
+  import datetime
+  from ofxparse import OfxParser, SecurityDictionary
+
+  dictionary = SecurityDictionary()
+  with open('statement.ofx', 'rb') as handle:
+      ofx = OfxParser.parse(handle)
+  dictionary.load_ofx_securities(
+      ofx.security_list,
+      observed_on=ofx.account.statement.end_date.date())
+
+  # A broker recode: CUSIP1 is the same issuer as CUSIP2 from 2012-05-01 on.
+  dictionary.add_mapping('CUSIP1', 'CUSIP2',
+                         valid_from=datetime.date(2012, 5, 1))
+
+  # Or load many dated edges from a CSV with columns
+  # source_id,target_id,effective_date,end_date,source,note
+  dictionary.load_mappings_csv('manual_mappings.csv')
+
+  for position in ofx.account.statement.positions:
+      result = dictionary.resolve_position(position)
+      result.identity      # unique id reported on the statement
+      result.canonical_id  # identity in effect on the trading day
+      result.ticker        # ticker of the canonical security on that day
+      result.ambiguous     # True when same-day mappings fork
+      if result.conflict:
+          result.conflict.chains()  # every retained chain
+
+  # Identical tickers stay separate unless a mapping connects them.
+  dictionary.find_by_ticker('ACM')
+
+  # Every revision is hash-chained, so a serialized dictionary is tamper
+  # evident and reproducible.
+  dictionary.to_json()
+
+A command line helper resolves whole statements to CSV::
+
+  python utils/resolve_positions.py statements/*.ofx \
+      --mappings manual_mappings.csv --output resolved_positions.csv
+
+Ambiguous rows carry the full conflict chains in the ``conflict_chains``
+column instead of being silently collapsed.
 
 Help!
 =====
