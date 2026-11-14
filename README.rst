@@ -114,7 +114,61 @@ Here's a sample program
   security.name
   security.ticker
   security.memo
-  
+
+
+Tax Lot Cost Ranges
+===================
+
+Old broker statements record buy and sell trades without saying which
+tax lot each sold share came from.  Rather than assume an accounting
+rule such as FIFO, ``ofxparse.costlots`` treats every lot assignment
+consistent with the known data as feasible and reports the bounds of
+that feasible set.
+
+A buy lot can only fund a sale on or after its trade date, the same lot
+share can never be consumed by two sales, and an end-of-day snapshot of
+the per-lot remaining quantity excludes assignments that were feasible
+from the trades alone.  For every sale the analysis returns the lowest
+and highest possible cost and the lot shares forced into that sale
+across *every* feasible allocation.  When nothing is forced, the result
+says so instead of guessing.
+
+.. code:: python
+
+  from datetime import datetime
+  from decimal import Decimal
+  from ofxparse import (OfxParser, Snapshot, analyze_statement,
+                        format_report)
+
+  with codecs.open('trades.ofx') as fileobj:
+      ofx = OfxParser.parse(fileobj)
+
+  # Optional: end-of-day per-lot remaining quantities, keyed by the buy
+  # transactions' FITIDs.  A later snapshot can rule out assignments that
+  # looked feasible from the trades alone.
+  snapshots = [
+      Snapshot(datetime(2026, 2, 20), {'buy-1': Decimal(70),
+                                       'buy-2': Decimal(70)}),
+  ]
+
+  reports = analyze_statement(ofx.account.statement, snapshots=snapshots)
+  for security, report in reports.items():
+      for result in report.ranges:
+          result.sale.id            # the sell transaction FITID
+          result.min_cost           # cheapest defensible cost
+          result.max_cost           # priciest defensible cost
+          result.cost_is_exact      # True when the bounds coincide
+          result.forced_allocations # lot shares every allocation must use
+
+  print(format_report(reports))
+
+The same engine works on data assembled without an OFX file through
+``analyze(lots, sales, snapshots)`` with ``Lot`` and ``Sale`` objects.
+Lot unit cost defaults to the actual cash outlay per share
+(``total / units``, including commission); pass ``basis='price'`` to use
+the reported unit price instead.  If the trades and snapshots cannot all
+hold at once, ``InfeasibleAllocationError`` is raised.
+
 
 Help!
 =====
