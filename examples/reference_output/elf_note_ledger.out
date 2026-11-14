@@ -1,0 +1,13 @@
+Processing file: ./examples/sample_exe64.elf
+  Note entry points:
+    section #2 (.note.ABI-tag) covers 0x00000254-0x00000274 (32 bytes)
+    section #3 (.note.SuSE) covers 0x00000274-0x0000028c (24 bytes)
+    section #4 (.note.gnu.build-id) covers 0x0000028c-0x000002b0 (36 bytes)
+    segment #5 covers 0x00000254-0x000002b0 (92 bytes)
+  Physical note records: 3
+    #0 at 0x00000254 (32 bytes) name='GNU' type=NT_GNU_ABI_TAG [duplicate entry]
+        entry points: section #2 (.note.ABI-tag), segment #5
+    #1 at 0x00000274 (24 bytes) name='SuSE' type=1163097427 [duplicate entry]
+        entry points: section #3 (.note.SuSE), segment #5
+    #2 at 0x0000028c (36 bytes) name='GNU' type=NT_GNU_BUILD_ID [duplicate entry]
+        entry points: section #4 (.note.gnu.build-id), segment #5
