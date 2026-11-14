@@ -404,12 +404,33 @@ of indexes can be passed as no\_conversion (new in v0.25):
 containing user-defined properties.
 (new in v0.47)
 
+Each record identifies the property section it comes from.  A property set
+stream may hold several sections, and the same property ID or even the same
+name (for example "记录号") can occur in more than one of them with a
+different meaning, so records are never merged by name or ID:
+
+- ``section_index``: zero-based index of the section in the stream
+- ``section_fmtid``: format identifier of the section
+- ``property_id``: raw property identifier inside that section
+- ``property_name``: name decoded from the section dictionary, or ``None``
+  when the dictionary is missing or the name cannot be decoded
+- ``property_type`` / ``property_type_name``: numeric ``VT_*`` type and its name
+- ``value``: value decoded to its natural Python type
+
 ::
 
     variables = ole.get_userdefined_properties(streamname, convert_time=True)
-    if len(variables):
-        for index, variable in enumerate(variables):
-            print('\t{} {}: {}'.format(index, variable['property_name'],variable['value']))
+    for variable in variables:
+        print(variable['section_index'],
+              variable['property_id'],
+              variable['property_name'],
+              variable['property_type_name'],
+              variable['value'])
+
+The name dictionary and the code page are looked up first, so their position
+inside the section does not matter.  When a name cannot be decoded, the
+record is still returned and can be found by ``section_index`` and
+``property_id``.  String values are decoded with the section code page.
 
 
 Close the OLE file

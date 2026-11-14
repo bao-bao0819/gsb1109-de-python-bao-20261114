@@ -8,6 +8,13 @@ olefile.py
     - fixed issue #156: write_sect now correctly detects when data is larger than the sector size
     - removed method get_document_variables, to be integrated in oletools (Word specific feature)
     - use GitHub actions for testing and Codecov for coverage, added python 3.8 to 3.12 (PR #157 by @hugovk)
+    - get_userdefined_properties now parses every user-defined section of a
+      property set stream: each record reports its section index, format ID,
+      raw property ID, decoded name, and typed value.  The name dictionary and
+      code page are located by property ID instead of a fixed offset, so their
+      order does not matter; string values are decoded with the section code
+      page and undecodable names no longer hide the value.  Same-named
+      properties in different sections are all returned.
 * 2020-10-07 v0.47.dev4:
     - added VT_VECTOR support for properties (PR #135 by Maciej Kotowicz @mak)
     - olefile is now distributed as a wheel package (PR #130 by @hugovk)
