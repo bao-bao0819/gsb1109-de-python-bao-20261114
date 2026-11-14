@@ -1,0 +1,31 @@
+.TH ODFAMOUNTVIEW 1 "2026-11-14" "odfpy" "User commands"
+.SH NAME
+odfamountview \- show an amount column view of an OpenDocument spreadsheet
+.SH SYNOPSIS
+.B odfamountview
+.RI [ "\-t table" ]
+.RI [ "\-c column" ]
+.I path
+.SH DESCRIPTION
+.B odfamountview
+reads a spreadsheet and reports, for every cell of a monetary column, the
+value exactly as stored in the file, the currency, and where the currency
+format comes from: an explicit cell style takes precedence over the row
+default, which takes precedence over the column default. Cells that cannot
+be recognised as amounts are listed with the reason, for example a cell
+that only displays a currency symbol as text without storing a value.
+.PP
+Totals are computed per currency code, or per exact (symbol, language,
+country) combination of the data style when no code is stored. Two
+currencies that happen to render the same symbol are never added together,
+and every total lists the cell references and raw values it was computed
+from so it can be traced back to the file.
+.SH OPTIONS
+.TP
+.BR \-t ", " \-\-table " " table
+Only inspect the named table.
+.TP
+.BR \-c ", " \-\-column " " column
+Only inspect one column, given as a letter such as B.
+.SH EXAMPLE
+.B odfamountview sales.ods

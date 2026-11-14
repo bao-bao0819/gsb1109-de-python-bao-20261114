@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# Show an amount column view of the sales details (or any other monetary
+# columns) of an OpenDocument spreadsheet.
+#
+# This is free software.  You may redistribute it under the terms
+# of the Apache license and the GNU General Public License Version
+# 2 or at your option any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public
+# License along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+#
+from __future__ import print_function
+
+import sys
+from optparse import OptionParser
+
+from odf.opendocument import load
+from odf import amountview
+
+
+def main():
+    usage = u'%prog [options] file.ods'
+    description = (u'Show an amount column view of a spreadsheet: for every '
+                   u'cell of a monetary column the stored value, the currency, '
+                   u'where the currency format comes from (explicit cell style, '
+                   u'row default or column default) or the reason the cell '
+                   u'cannot be recognised as an amount.  Totals are computed '
+                   u'per currency - never per displayed symbol - and list the '
+                   u'cells they were computed from.')
+    parser = OptionParser(usage=usage, description=description)
+    parser.add_option('-t', '--table', dest='table', default=None,
+                      help='only inspect the table named TABLE')
+    parser.add_option('-c', '--column', dest='column', default=None,
+                      help='only inspect column COLUMN (a letter, e.g. B)')
+    options, args = parser.parse_args()
+    if len(args) != 1:
+        parser.print_help()
+        return 1
+    doc = load(args[0])
+    cells = amountview.amount_view(doc, tablename=options.table,
+                                   column=options.column)
+    report = amountview.format_report(cells)
+    if report:
+        print(report)
+    else:
+        print(u'No amount columns found.')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

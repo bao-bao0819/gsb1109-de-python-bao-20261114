@@ -1,0 +1,66 @@
+<?xml version="1.0" ?>
+<!DOCTYPE refentry PUBLIC "-//OASIS//DTD DocBook XML V4.2//EN"
+   "http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd">
+<refentry id="odfamountview">
+  <refentryinfo>
+    <productname>odfpy</productname>
+    <author><firstname>Søren</firstname><surname>Roug</surname>
+    <contrib>Original author</contrib>
+    </author>
+  </refentryinfo>
+  <refmeta>
+    <refentrytitle>odfamountview</refentrytitle>
+    <manvolnum>1</manvolnum>
+    <refmiscinfo class="manual">User commands</refmiscinfo>
+  </refmeta>
+
+<refnamediv>
+<refname>odfamountview</refname>
+<refpurpose>Show an amount column view of an OpenDocument spreadsheet</refpurpose>
+</refnamediv>
+
+<refsynopsisdiv>
+<cmdsynopsis>
+    <command>odfamountview</command>
+    <arg><option>-t <replaceable>table</replaceable></option></arg>
+    <arg><option>-c <replaceable>column</replaceable></option></arg>
+    <arg choice="plain"><replaceable>path</replaceable></arg>
+</cmdsynopsis>
+</refsynopsisdiv>
+
+<refsect1><title>Description</title>
+<para>
+odfamountview reads a spreadsheet and reports, for every cell of a
+monetary column, the value exactly as stored in the file, the currency,
+and where the currency format comes from: an explicit cell style takes
+precedence over the row default, which takes precedence over the column
+default.  Cells that cannot be recognised as amounts are listed with the
+reason, for example a cell that only displays a currency symbol as text
+without storing a value.
+</para>
+<para>
+Totals are computed per currency code, or per exact
+(symbol, language, country) combination of the data style when no code
+is stored.  Two currencies that happen to render the same symbol are
+never added together, and every total lists the cell references and raw
+values it was computed from so it can be traced back to the file.
+</para>
+</refsect1>
+<refsect1><title>Options</title>
+<variablelist>
+  <varlistentry>
+    <term>-t, --table</term>
+    <listitem><para>Only inspect the named table.</para></listitem>
+  </varlistentry>
+  <varlistentry>
+    <term>-c, --column</term>
+    <listitem><para>Only inspect one column, given as a letter such as B.</para></listitem>
+  </varlistentry>
+</variablelist>
+</refsect1>
+<refsect1><title>Example</title>
+<screen>
+odfamountview sales.ods
+</screen>
+</refsect1>
+</refentry>
