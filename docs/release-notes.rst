@@ -1,6 +1,14 @@
 Release Notes
 =============
 
+**Unreleased**
+
+- Added :mod:`pysubs2.calibration`, a toolkit (plus ``python -m pysubs2.calibration``)
+  for frame-only MicroDVD transcripts. Given candidate frame-rates and a table of
+  cues with approximate broadcast-time windows, it reports every frame-rate whose
+  lead-in offset interval can satisfy all windows, including separate runs in which
+  a single suspicious check is excluded (the excluded check is named in the output).
+
 **1.9.1** --- released on 2026-10-30
 
 - SRT parser is more conservative about removing subtitle indices (Issue #119)

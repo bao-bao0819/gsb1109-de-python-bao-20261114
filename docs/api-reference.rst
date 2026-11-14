@@ -75,6 +75,14 @@ Misc methods
    :members:
    :exclude-members: Times
 
+``pysubs2.calibration`` --- MicroDVD frame-rate/offset calibration
+------------------------------------------------------------------
+
+See :doc:`calibration` for a narrative guide.
+
+.. automodule:: pysubs2.calibration
+   :members:
+
 ``pysubs2.exceptions`` --- thrown exceptions
 --------------------------------------------
 

@@ -1,4 +1,4 @@
-from . import cli, exceptions, formats, time
+from . import calibration, cli, exceptions, formats, time
 from .common import VERSION, Alignment, Color
 from .exceptions import *
 from .formats import whisper
@@ -13,6 +13,7 @@ __all__ = [
     "SSAEvent",
     "SSAFile",
     "SSAStyle",
+    "calibration",
     "cli",
     "exceptions",
     "formats",

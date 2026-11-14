@@ -47,6 +47,7 @@ Documentation
 
    supported-formats
    tutorial
+   calibration
    api-reference
    cli
    release-notes
