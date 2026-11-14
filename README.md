@@ -146,3 +146,29 @@ Creating/writing a DBF:
             print('--------')
 
     table.close()
+
+Extracting DBT memo payloads:
+
+    import dbf
+
+    # one entry per distinct memo (table file + DBT block), with every
+    # (table, original record number, field) that references it
+    memos = dbf.extract_memos("some-file.dbf")
+    for memo in memos:
+        print(memo.block, memo.size, len(memo.references), memo.payload[:40])
+
+    # references to unusable blocks are reported separately, never merged
+    # into the following memo
+    for missing in memos.missing:
+        print(missing.block, missing.reason, missing.references)
+
+    # look up a specific row/field (0-based physical record number)
+    entry = memos.find("some-file.dbf", record_number, "notes")
+
+    # or persist the payloads for later lookup by table name, row, and field
+    store = dbf.save_memos("some-file.dbf", "detached-memos")
+    payload = store.payload("some-file", row_number, "notes")
+
+Memos are returned as the exact bytes from the DBT file; decoding is left to
+the caller.  The same block number in a different table's DBT is a different
+memo, so payloads are always keyed by table as well as block.

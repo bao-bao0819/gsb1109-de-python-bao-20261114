@@ -3100,6 +3100,13 @@ class Table(_Navigation):
         """
         raise NotImplementedError("_check_memo_integrity must be implemented by subclass")
 
+    def extract_memos(self):
+        """
+        extract the memo payloads referenced by this table's memo fields
+        """
+        from .memos import extract_memos
+        return extract_memos(self)
+
     def _initialize_fields(self):
         """
         builds the FieldList of names, types, and descriptions from the disk file

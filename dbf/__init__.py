@@ -81,6 +81,9 @@ from .tables import Table, Record, List, Index, Relation, Iter, IndexLocation
 from .tables import CodePage, FieldnameList, RecordTemplate
 from .tables import Db3Table, ClpTable, FpTable, VfpTable
 from .tables import RecordVaporWare
+from .memos import MemoReference, MemoPayload, MissingMemo, MemoExtraction
+from .memos import extract_memos, extract_memo_payloads, memo_payloads
+from .memo_store import MemoStore, StoredMemo, save_memos, load_memos, find_memo
 
 api = fake_module('api',
     'Table', 'Record', 'List', 'Index', 'Relation', 'Iter', 'Null', 'Char', 'Date', 'DateTime', 'Time',
@@ -88,8 +91,10 @@ api = fake_module('api',
     'recno', 'source_table', 'reset', 'scatter', 'scan', 'undelete', 'write', 'export', 'pqlc', 'from_csv',
     'NullDate', 'NullDateTime', 'NullTime', 'NoneType', 'NullType', 'Decimal', 'Vapor', 'Period',
     'Truth', 'Falsth', 'Unknown', 'On', 'Off', 'Other', 'table_type',
+    'MemoExtraction', 'extract_memos', 'memo_payloads',
     'DbfError', 'DataOverflowError', 'BadDataError', 'FieldMissingError',
-    'FieldSpecError', 'NonUnicodeError', 'NotFoundError',
+    'FieldSpecError', 'NonUnicodeError', 'NotFoundError', 'MemoReference', 'MemoPayload', 'MissingMemo',
+    'MemoStore', 'save_memos', 'load_memos', 'find_memo',
     'DbfWarning', 'Eof', 'Bof', 'DoNotIndex', 'FieldNameWarning', 'IndexLocation',
     'Process', 'Templates', 'CLOSED', 'READ_ONLY', 'READ_WRITE',
     )
@@ -115,4 +120,7 @@ __all__ = (
         'CodePage', 'FieldnameList', 'RecordTemplate',
         'Db3Table', 'ClpTable', 'FpTable', 'VfpTable',
         'RecordVaporWare',
+        'MemoExtraction', 'MemoReference', 'MemoPayload', 'MissingMemo',
+        'MemoStore', 'StoredMemo', 'save_memos', 'load_memos', 'find_memo',
+        'extract_memos', 'extract_memo_payloads', 'memo_payloads',
         )
