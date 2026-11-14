@@ -1,0 +1,54 @@
+Old file: ./examples/sample_exe64.elf (12333 bytes)
+New file: ./examples/sample_exe64.elf (12333 bytes)
+
+Totals (new - old)
+  file size              +0
+  section disk declared  +0
+  overlapping claims     +0
+  section disk (unique)  +0
+  gaps/headers           +0
+  expanded size          +0
+
+Sections
+  name                             disk     expanded  pairing
+  .bss                               +0           +0  paired 1:1
+  .comment                           +0           +0  paired 1:1
+  .comment.SUSE.OPTs                 +0           +0  paired 1:1
+  .ctors                             +0           +0  paired 1:1
+  .data                              +0           +0  paired 1:1
+  .debug_abbrev                      +0           +0  paired 1:1
+  .debug_aranges                     +0           +0  paired 1:1
+  .debug_frame                       +0           +0  paired 1:1
+  .debug_info                        +0           +0  paired 1:1
+  .debug_line                        +0           +0  paired 1:1
+  .debug_loc                         +0           +0  paired 1:1
+  .debug_pubnames                    +0           +0  paired 1:1
+  .debug_ranges                      +0           +0  paired 1:1
+  .debug_str                         +0           +0  paired 1:1
+  .dtors                             +0           +0  paired 1:1
+  .dynamic                           +0           +0  paired 1:1
+  .dynstr                            +0           +0  paired 1:1
+  .dynsym                            +0           +0  paired 1:1
+  .eh_frame                          +0           +0  paired 1:1
+  .eh_frame_hdr                      +0           +0  paired 1:1
+  .fini                              +0           +0  paired 1:1
+  .gnu.hash                          +0           +0  paired 1:1
+  .gnu.version                       +0           +0  paired 1:1
+  .gnu.version_r                     +0           +0  paired 1:1
+  .got                               +0           +0  paired 1:1
+  .got.plt                           +0           +0  paired 1:1
+  .hash                              +0           +0  paired 1:1
+  .init                              +0           +0  paired 1:1
+  .interp                            +0           +0  paired 1:1
+  .jcr                               +0           +0  paired 1:1
+  .note.ABI-tag                      +0           +0  paired 1:1
+  .note.SuSE                         +0           +0  paired 1:1
+  .note.gnu.build-id                 +0           +0  paired 1:1
+  .plt                               +0           +0  paired 1:1
+  .rela.dyn                          +0           +0  paired 1:1
+  .rela.plt                          +0           +0  paired 1:1
+  .rodata                            +0           +0  paired 1:1
+  .shstrtab                          +0           +0  paired 1:1
+  .strtab                            +0           +0  paired 1:1
+  .symtab                            +0           +0  paired 1:1
+  .text                              +0           +0  paired 1:1
