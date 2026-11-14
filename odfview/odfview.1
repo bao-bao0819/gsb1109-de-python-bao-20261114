@@ -1,0 +1,66 @@
+.TH ODFVIEW 1
+.\" $Id$
+.SH NAME
+odfview \- export a partial spreadsheet view for a selected set of tracked row/column changes
+.SH SYNOPSIS
+.B odfview
+[\fB\-c\fR \fIchange-id\fR] ...
+[\fB\-a\fR]
+[\fB\-l\fR]
+[\fB\-t\fR \fItable\fR]
+[\fB\-o\fR \fIcsv-path\fR]
+[\fB\-u\fR \fIunresolvable-csv\fR]
+\fIspreadsheet.ods\fR
+.SH DESCRIPTION
+.B odfview
+reads the unresolved table change records (row/column insertions, deletions
+and movements) stored in an OpenDocument spreadsheet and rebuilds the sheet
+as it would look if only the changes selected on the command line were
+applied.
+.PP
+A selected change is kept
+.IR applied .
+The empty selection therefore reconstructs the original sheet: inserted
+rows/columns disappear, deleted rows/columns (including their saved old
+values) come back, and movements are undone. Selecting every change
+reproduces the current sheet.
+.PP
+A change that depends on another change (for example a movement that moves
+rows created by an earlier insertion) cannot be rebuilt when the prerequisite
+is not selected. The cells covered by such a change are written to the
+unresolvable report instead of receiving invented coordinates; all unrelated
+areas of the sheet are still exported normally.
+.SH OPTIONS
+.TP
+.BI \-c " change-id"
+Keep the tracked change with this identifier applied. May be repeated. Use
+.B \-l
+to discover the identifiers present in the document.
+.TP
+.B \-a
+Select every tracked change, reproducing the current sheet.
+.TP
+.B \-l
+List the tracked changes (identifier, kind, position and dependencies) and
+exit without exporting a view.
+.TP
+.BI \-t " table"
+Table to export, given by name or zero based index. Defaults to the first
+table.
+.TP
+.BI \-o " csv-path"
+Write the reconstructed view as CSV to this file. Defaults to standard
+output.
+.TP
+.BI \-u " unresolvable-csv"
+Write the cells that cannot be rebuilt for the selection to this CSV file.
+Defaults to standard error.
+.SH EXAMPLES
+.nf
+odfview \-l accounts.ods
+odfview \-c ctm-1 \-c ctm-2 \-o view.csv \-u broken.csv accounts.ods
+odfview \-a accounts.ods
+.fi
+.SH "SEE ALSO"
+.BR csv2ods (1),
+.BR odflint (1)

@@ -35,6 +35,7 @@ if platform.system() in ('Linux','Unix'):
            'odfmeta/odfmeta.1',
            'odfoutline/odfoutline.1',
            'odfuserfield/odfuserfield.1',
+           'odfview/odfview.1',
            'xml2odf/xml2odf.1'])]
 else:
     man1pages = []
@@ -95,6 +96,7 @@ In addition to the API, there are a few scripts:
 - odfmeta - List or change the metadata of an ODF file
 - odfoutline - Show outline of OpenDocument
 - odfuserfield - List or change the user-field declarations in an ODF file
+- odfview - Export a partial spreadsheet view for selected tracked changes
 - xml2odf - Create OD? package from OpenDocument in XML form
 
 The source code is at https://github.com/eea/odfpy
@@ -118,6 +120,7 @@ The code at https://joinup.ec.europa.eu/software/odfpy/home is obsolete."""
           'odfmeta/odfmeta',
           'odfoutline/odfoutline',
           'odfuserfield/odfuserfield',
+          'odfview/odfview',
           'xml2odf/xml2odf'],
       data_files=datafiles,
       install_requires=['defusedxml', ]

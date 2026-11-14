@@ -1,0 +1,134 @@
+<?xml version="1.0" ?>
+<!DOCTYPE refentry PUBLIC "-//OASIS//DTD DocBook XML V4.2//EN"
+   "http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd">
+<refentry id="odfview">
+  <refentryinfo>
+    <productname>odfpy</productname>
+  </refentryinfo>
+  <refmeta>
+    <refentrytitle>odfview</refentrytitle>
+    <manvolnum>1</manvolnum>
+    <refmiscinfo class="manual">User commands</refmiscinfo>
+  </refmeta>
+
+<refnamediv>
+<refname>odfview</refname>
+<refpurpose>Export a partial spreadsheet view for a selected set of tracked
+row/column changes</refpurpose>
+</refnamediv>
+
+<refsynopsisdiv>
+<cmdsynopsis>
+    <command>odfview</command>
+    <arg rep="repeat">-c <replaceable>change-id</replaceable></arg>
+    <arg>-a</arg>
+    <arg>-l</arg>
+    <arg choice="opt">-t <replaceable>table</replaceable></arg>
+    <arg choice="opt">-o <replaceable>csv-path</replaceable></arg>
+    <arg choice="opt">-u <replaceable>unresolvable-csv</replaceable></arg>
+    <arg choice="plain"><replaceable>spreadsheet.ods</replaceable></arg>
+</cmdsynopsis>
+</refsynopsisdiv>
+
+<refsect1><title>Description</title>
+<para><command>odfview</command> reads the unresolved table change records
+(row/column insertions, deletions and movements) stored in an OpenDocument
+spreadsheet and rebuilds the sheet as it would look if only the changes
+selected on the command line were applied.
+</para>
+<para>
+A selected change is kept <emphasis>applied</emphasis>. The empty selection
+therefore reconstructs the original sheet: inserted rows/columns disappear,
+deleted rows/columns (including their saved old values) come back, and
+movements are undone. Selecting every change reproduces the current sheet.
+</para>
+<para>
+A change that depends on another change (for example a movement that moves
+rows created by an earlier insertion) cannot be rebuilt when the prerequisite
+is not selected. The cells covered by such a change are written to the
+unresolvable report instead of receiving invented coordinates; all unrelated
+areas of the sheet are still exported normally.
+</para>
+</refsect1>
+
+<refsect1><title>Options</title>
+<variablelist>
+
+<varlistentry>
+<term>-c <replaceable>change-id</replaceable></term>
+<listitem>
+<para>
+Keep the tracked change with this identifier applied. The option may be
+repeated to select several changes. Use <option>-l</option> to discover the
+identifiers present in the document.
+</para>
+</listitem>
+</varlistentry>
+
+<varlistentry>
+<term>-a</term>
+<listitem>
+<para>
+Select every tracked change, reproducing the current sheet.
+</para>
+</listitem>
+</varlistentry>
+
+<varlistentry>
+<term>-l</term>
+<listitem>
+<para>
+List the tracked changes (identifier, kind, position and dependencies) and
+exit without exporting a view.
+</para>
+</listitem>
+</varlistentry>
+
+<varlistentry>
+<term>-t <replaceable>table</replaceable></term>
+<listitem>
+<para>
+Table to export, given by name or zero based index. Defaults to the first
+table.
+</para>
+</listitem>
+</varlistentry>
+
+<varlistentry>
+<term>-o <replaceable>csv-path</replaceable></term>
+<listitem>
+<para>
+Write the reconstructed view as CSV to this file. Defaults to standard output.
+</para>
+</listitem>
+</varlistentry>
+
+<varlistentry>
+<term>-u <replaceable>unresolvable-csv</replaceable></term>
+<listitem>
+<para>
+Write the cells that cannot be rebuilt for the selection to this CSV file.
+Defaults to standard error.
+</para>
+</listitem>
+</varlistentry>
+
+</variablelist>
+</refsect1>
+
+<refsect1><title>Examples</title>
+<screen>
+odfview -l accounts.ods
+odfview -c ctm-1 -c ctm-2 -o view.csv -u broken.csv accounts.ods
+odfview -a accounts.ods
+</screen>
+</refsect1>
+
+<refsect1><title>See Also</title>
+<para>
+<command>csv2ods</command>(1),
+<command>odflint</command>(1)
+</para>
+</refsect1>
+
+</refentry>

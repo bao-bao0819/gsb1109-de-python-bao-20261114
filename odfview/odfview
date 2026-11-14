@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# Copyright (C) 2026
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public
+# License as published by the Free Software Foundation; either
+# version 2.1 of the License, or (at your option) any later version.
+#
+# This library is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+# Lesser General Public License for more details.
+#
+# You should have received a copy of the GNU Lesser General Public
+# License along with this library; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+#
+# Contributor(s):
+#
+
+"""Export a partial spreadsheet view for a chosen set of tracked changes.
+
+The tracked table changes (row/column insertions, deletions and movements)
+recorded in an ODS file are replayed only for the change ids given on the
+command line.  Cells whose logical coordinates cannot be rebuilt for the
+selection are reported separately instead of being guessed.
+"""
+
+from __future__ import print_function
+
+import csv
+import sys
+from optparse import OptionParser
+
+from odf.opendocument import load
+from odf import trackedviews
+
+
+def exit_with_usage(parser):
+    parser.print_help(sys.stderr)
+    sys.exit(2)
+
+
+def list_changes(document):
+    for change in trackedviews.list_changes(document):
+        dependencies = u",".join(change['dependencies']) or u"-"
+        line = u"%(id)s\t%(kind)s" % change
+        if change['axis']:
+            line += u"\t%(axis)s@%(position)s x%(count)s" % change
+        line += u"\tdeps: " + dependencies
+        print(line.encode('utf-8') if sys.version_info[0] == 2
+              else line)
+
+
+def write_view(view, output, unresolvable_output):
+    writer = csv.writer(output)
+    writer.writerow([view.coordinate_label(key)
+                     for key in view.column_keys])
+    for row in view.to_matrix():
+        writer.writerow([u'' if value is None else value for value in row])
+
+    if view.unresolvable:
+        report = csv.writer(unresolvable_output)
+        report.writerow(['table', 'physical_row', 'physical_column',
+                         'reason', 'change_ids'])
+        for entry in view.unresolvable:
+            report.writerow([
+                entry['table'],
+                entry['physical_row'],
+                entry['physical_column'],
+                entry['reason'],
+                u";".join(entry['change_ids']),
+            ])
+
+
+def main(argv=None):
+    parser = OptionParser(
+        usage=u"%prog [options] input.ods",
+        description=u"Export a partial spreadsheet view built from a selected "
+                    u"set of tracked table changes.")
+    parser.add_option('-c', '--change', action='append', dest='changes',
+                      default=[], metavar='ID',
+                      help=u"keep this tracked change applied (repeatable)")
+    parser.add_option('-a', '--all', action='store_true', dest='select_all',
+                      help=u"keep every recorded change applied")
+    parser.add_option('-l', '--list', action='store_true', dest='list_only',
+                      help=u"list the tracked changes and exit")
+    parser.add_option('-t', '--table', action='store', dest='table',
+                      default=0,
+                      help=u"table name or zero based index (default: 0)")
+    parser.add_option('-o', '--output', action='store', dest='output',
+                      metavar='FILE',
+                      help=u"CSV output file (default: stdout)")
+    parser.add_option('-u', '--unresolvable', action='store',
+                      dest='unresolvable', metavar='FILE',
+                      help=u"write unrebuildable cells to this CSV file "
+                           u"(default: stderr)")
+    options, args = parser.parse_args(argv)
+
+    if len(args) != 1:
+        exit_with_usage(parser)
+
+    document = load(args[0])
+
+    if options.list_only:
+        list_changes(document)
+        return 0
+
+    if options.select_all:
+        selected_ids = None
+    else:
+        selected_ids = options.changes
+
+    table = options.table
+    if isinstance(table, str) and table.isdigit():
+        table = int(table)
+
+    view = trackedviews.SelectedView(document, selected_ids=selected_ids,
+                                     table=table)
+
+    if options.output:
+        output = open(options.output, 'w', newline='')
+    else:
+        output = sys.stdout
+    if options.unresolvable:
+        unresolvable_output = open(options.unresolvable, 'w', newline='')
+    else:
+        unresolvable_output = sys.stderr
+
+    try:
+        write_view(view, output, unresolvable_output)
+    finally:
+        if options.output:
+            output.close()
+        if options.unresolvable:
+            unresolvable_output.close()
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
+
+# Local Variables: ***
+# mode: python     ***
+# End:             ***
