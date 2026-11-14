@@ -1,5 +1,8 @@
+from itertools import combinations
 from random import uniform, randint
 import time
+
+import pytest
 
 import polyline
 
@@ -226,3 +229,128 @@ def test_a_variety_of_precisions():
     print(
         f"encoded and decoded {100 * okays / float(waypoints):.2f}% correctly for {waypoints} "
         f"waypoints @ {round(waypoints / patience, 0)} wp/sec")
+
+
+def _brute_force_best(coords, parts, allowed):
+    """Exhaustively compute the optimal (longest shard, total length) split."""
+    best = None
+    for cuts in combinations(range(1, len(coords) - 1), parts - 1):
+        if not all(cut in allowed for cut in cuts):
+            continue
+        bounds = [0] + list(cuts) + [len(coords) - 1]
+        shards = [polyline.encode(coords[a:b + 1]) for a, b in zip(bounds, bounds[1:])]
+        candidate = (max(len(s) for s in shards), sum(len(s) for s in shards))
+        if best is None or candidate < best:
+            best = candidate
+    return best
+
+
+def test_split_roundtrip_preserves_duplicate_stops():
+    coords = [
+        (40.641, -8.654),
+        (40.641, -8.654),
+        (40.641, -8.656),
+        (40.642, -8.656),
+        (40.642, -8.655),
+        (40.642, -8.655),
+        (40.642, -8.655),
+        (40.642, -8.653),
+        (40.642, -8.653),
+        (40.642, -8.653),
+        (40.641, -8.653),
+        (40.641, -8.654)
+    ]
+    shards = polyline.split(coords, 3)
+    assert len(shards) == 3
+
+    decoded = [polyline.decode(shard) for shard in shards]
+    # every shard decodes independently from the zero coordinate
+    assert decoded[0][0] == coords[0]
+    assert decoded[-1][-1] == coords[-1]
+    # adjacent shards duplicate their junction point
+    for first, second in zip(decoded, decoded[1:]):
+        assert first[-1] == second[0]
+
+    # only the artificial junction duplicates are removed on join, the
+    # genuinely repeated stops of the original route are preserved
+    assert polyline.join(shards) == coords
+    assert polyline.encode(polyline.join(shards)) == polyline.encode(coords)
+
+
+def test_split_minimizes_longest_shard_then_total_length():
+    coords = [(uniform(-1.0, 1.0), uniform(-1.0, 1.0)) for _ in range(4)]
+    coords += [(uniform(59.0, 61.0), uniform(59.0, 61.0)) for _ in range(6)]
+    coords += [(uniform(-0.001, 0.001), uniform(-0.001, 0.001)) for _ in range(5)]
+    coords[0] = (0.0, 0.0)
+    canonical = polyline.decode(polyline.encode(coords))
+
+    for parts in (2, 3, 4):
+        shards = polyline.split(coords, parts)
+        assert len(shards) == parts
+        assert polyline.join(shards) == canonical
+
+        longest = max(len(shard) for shard in shards)
+        total = sum(len(shard) for shard in shards)
+        allowed = set(range(1, len(coords) - 1))
+        assert (longest, total) == _brute_force_best(coords, parts, allowed)
+
+
+def test_split_prefers_smaller_total_on_tie():
+    coords = [(0.0, 0.0), (0.00001, 0.0), (1.0, 0.0), (1.00001, 0.0)]
+    shards = polyline.split(coords, 2)
+    # both cuts give a longest shard of the same length, the cut with the
+    # smaller total number of characters wins
+    assert shards == [polyline.encode(coords[:2]), polyline.encode(coords[1:])]
+    assert polyline.join(shards) == coords
+
+
+def test_split_only_cuts_at_stops():
+    coords = [(0.00001 * i, 0.0) for i in range(6)]
+    shards = polyline.split(coords, 2, stops=[2])
+    assert shards == [polyline.encode(coords[:3]), polyline.encode(coords[2:])]
+    assert polyline.join(shards) == polyline.decode(polyline.encode(coords))
+
+
+def test_split_never_cuts_inside_tunnels():
+    coords = [(0.00001 * i, 0.0) for i in range(7)]
+    shards = polyline.split(coords, 2, tunnels=[(1, 5)])
+    first = polyline.decode(shards[0])
+    # cuts strictly inside the tunnel are forbidden, only the portals remain
+    canonical = polyline.decode(polyline.encode(coords))
+    assert first in (canonical[:2], canonical[:6])
+    assert polyline.join(shards) == canonical
+
+
+def test_split_geojson_roundtrip():
+    coords = [(-8.654, 40.641), (-8.656, 40.641), (-8.656, 40.642), (-8.653, 40.642)]
+    shards = polyline.split(coords, 2, geojson=True)
+    assert polyline.join(shards, geojson=True) == coords
+
+
+def test_split_single_part():
+    coords = [(38.5, -120.2), (40.7, -120.95), (43.252, -126.453)]
+    assert polyline.split(coords, 1) == [polyline.encode(coords)]
+
+
+def test_split_errors():
+    coords = [(38.5, -120.2), (40.7, -120.95), (43.252, -126.453)]
+    with pytest.raises(ValueError):
+        polyline.split(coords, 0)
+    with pytest.raises(ValueError):
+        polyline.split([], 2)
+    with pytest.raises(ValueError):
+        # not enough cut candidates for 3 parts
+        polyline.split(coords, 3)
+    with pytest.raises(ValueError):
+        # every candidate cut lies inside a tunnel
+        polyline.split(coords * 3, 2, tunnels=[(0, 8)])
+
+
+def test_join_verifies_junctions():
+    shards = polyline.split([(0.0, 0.0), (1.0, 1.0), (2.0, 2.0), (3.0, 3.0)], 2)
+    assert polyline.join(shards) == [(0.0, 0.0), (1.0, 1.0), (2.0, 2.0), (3.0, 3.0)]
+
+    with pytest.raises(ValueError):
+        polyline.join([shards[0], polyline.encode([(9.0, 9.0), (10.0, 10.0)])])
+    with pytest.raises(ValueError):
+        polyline.join([shards[0], ''])
