@@ -1,6 +1,16 @@
 Change Log
 ==========
 
+Unreleased
+
+- Add `metar.Precipitation.PrecipitationStore` for interval estimates from
+  overlapping cumulative precipitation groups.  Six-hour and twenty-four-hour
+  records constrain the same hours instead of being added.  Results distinguish
+  exact zero, trace, finite ranges, unknown upper bounds and contradictory
+  records.  Contradictions name their source groups and are never replaced by
+  zero.
+- Keep trace values when parsing `P`, `6` and `7` precipitation groups.
+
 metar-2.0.2 (26 October 2026)
 
 - Infer a month when METAR day is ambiguous and day of the month does not

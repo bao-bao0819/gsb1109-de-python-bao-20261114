@@ -74,3 +74,20 @@ POSSIBILITY OF SUCH DAMAGE.
 """
     % __author__
 )
+
+
+from metar.Precipitation import (  # noqa: E402  (kept at end to avoid cycles)
+    DEFAULT_TRACE_LIMIT,
+    UNKNOWN,
+    ConflictError,
+    PrecipitationConflict,
+    PrecipitationConflictError,
+    PrecipitationInterval,
+    PrecipitationRecord,
+    PrecipitationStore,
+    PrecipitationTotal,
+    RainGauge,
+    bounds,
+    interval_total,
+    precipitation_interval,
+)

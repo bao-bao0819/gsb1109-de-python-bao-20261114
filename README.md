@@ -106,6 +106,45 @@ tendency, or `None` when no unambiguous tendency was reported. These describe
 the reported past tendency; no trend is inferred from the range values.
 `obs.runway_visual_range()` includes the tendency when available.
 
+### Precipitation intervals
+
+`Metar` keeps the cumulative precipitation groups it parses (`precip_1hr`,
+`precip_3hr`, `precip_6hr` and `precip_24hr`).  When several reports are
+available, `metar.Precipitation.PrecipitationStore` combines their overlapping
+windows into bounds for any whole-hour interval:
+
+```python
+from datetime import timedelta
+
+from metar.Precipitation import PrecipitationStore
+
+store = PrecipitationStore()
+store.add(obs1.time - timedelta(hours=6), obs1.time, 0.60, source="6-hour")
+store.add(obs2.time - timedelta(hours=24), obs2.time, 1.00, source="24-hour")
+
+result = store.total(obs1.time - timedelta(hours=6), obs1.time)
+result.minimum, result.maximum   # tightest bounds supported by the reports
+result.status                    # "exact", "zero", "trace", "range",
+                                 # "unknown", "unknown_upper" or "conflict"
+
+# A report can seed a store directly:
+store = obs1.precipitation_store()
+store.add_metar(obs2)
+bounds = obs1.precipitation_bounds(
+    obs1.time - timedelta(hours=6), obs1.time
+)
+```
+
+Overlapping 6-hour and 24-hour records constrain the same hours; they are not
+added.  Four-zero `P0000`/`60000`/`70000` groups are trace reports: the total
+is above zero but below the 0.01in reportable minimum, so `status` is
+`"trace"` and `maximum` is the trace limit.  An exact `0.00` record (or
+constraints that force every hour to zero) gives `status == "zero"`.  A record
+that only supplies a lower bound leaves `maximum` as `None` and `status` as
+`"unknown_upper"`.  When the records would force a negative amount in some
+hour, the result has `status == "conflict"` and `result.conflict.sources`
+names the records involved; impossible hours are never clamped to zero.
+
 See the sample.py script for an annonated demonstration of the use
 of this code.  Just as an appetizer, here's an interactive example...
 

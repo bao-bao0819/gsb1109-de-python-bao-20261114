@@ -140,6 +140,8 @@ if obs.runway:
 if obs.press:
     print("pressure: %s" % obs.press.string("mb"))
 
+# Overlapping cumulative groups can be combined into interval bounds with
+# metar.Precipitation.PrecipitationStore.  See README.md for an example.
 # The 'precip_1hr' attribute is a precipitation object.
 if obs.precip_1hr:
     print("precipitation: %s" % obs.precip_1hr.string("in"))

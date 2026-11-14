@@ -881,19 +881,27 @@ class Metar(object):
         """
         Parse a 3-, 6- or 24-hour cumulative preciptation remark group.
         """
-        value = float(d["precip"]) / 100.0
+        if d["precip"] == "0000":
+            value = precipitation("0000", "IN")
+        else:
+            value = precipitation(float(d["precip"]) / 100.0, "IN")
         if d["type"] == "6":
             if self.cycle in [3, 9, 15, 21]:
-                self.precip_3hr = precipitation(value, "IN")
+                self.precip_3hr = value
             else:
-                self.precip_6hr = precipitation(value, "IN")
+                self.precip_6hr = value
         else:
-            self.precip_24hr = precipitation(value, "IN")
+            self.precip_24hr = value
 
     def _handlePrecip1hrRemark(self, d):
-        """Parse an hourly precipitation remark group."""
-        value = float(d["precip"]) / 100.0
-        self.precip_1hr = precipitation(value, "IN")
+        """Parse an hourly precipitation remark group.
+
+        Four zeros denote a trace, as they do in the cumulative groups.
+        """
+        if d["precip"] == "0000":
+            self.precip_1hr = precipitation("0000", "IN")
+        else:
+            self.precip_1hr = precipitation(float(d["precip"]) / 100.0, "IN")
 
     def _handleTemp1hrRemark(self, d):
         """
@@ -1171,6 +1179,51 @@ class Metar(object):
             lines.append("- " + " ".join(self._unparsed_remarks))
         lines.append("METAR: " + self.code)
         return "\n".join(lines)
+
+    def precipitation_store(self, records=None, trace_limit=None):
+        """Return a precipitation interval store seeded with this report.
+
+        The returned :class:`metar.Precipitation.PrecipitationStore` starts
+        with this report's 1-, 3-, 6- and 24-hour cumulative precipitation
+        groups (if present).  Additional reports can be added with
+        ``store.add_metar(other)`` before querying an interval.
+        """
+        from metar.Precipitation import PrecipitationStore
+
+        if trace_limit is None:
+            store = PrecipitationStore(records=records)
+        else:
+            store = PrecipitationStore(records=records, trace_limit=trace_limit)
+        store.add_metar(self)
+        return store
+
+    def precipitation_interval(
+        self, start, end=None, records=None, units=None, trace_limit=None
+    ):
+        """Return bounds for cumulative precipitation over an interval.
+
+        The store is seeded with this report and any ``records`` supplied
+        (other METAR objects or precipitation records).  See
+        :meth:`precipitation_store`.
+        """
+        store = self.precipitation_store(records=records, trace_limit=trace_limit)
+        return store.total(start, end, units=units)
+
+    precip_interval = precipitation_interval
+    precipitation_between = precipitation_interval
+    precip_between = precipitation_interval
+    precipitation_total = precipitation_interval
+    precip_total = precipitation_interval
+
+    def precipitation_bounds(
+        self, start, end=None, records=None, units=None, trace_limit=None
+    ):
+        """Return ``(minimum, maximum)`` for an interval; see above."""
+        return self.precipitation_interval(
+            start, end, records=records, units=units, trace_limit=trace_limit
+        ).value()
+
+    precip_bounds = precipitation_bounds
 
     def report_type(self):
         """
