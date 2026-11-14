@@ -62,6 +62,12 @@ Misc methods
 .. autoclass:: pysubs2.SSAEvent
    :members:
 
+``pysubs2.karaoke`` --- word-level alignment
+-------------------------------------------
+
+.. automodule:: pysubs2.karaoke
+   :members: KaraokeWord, KaraokeConflict, KaraokeAlignment, align_text, align_event, align_file
+
 ``SSAStyle`` --- a subtitle style
 ---------------------------------
 

@@ -2,6 +2,14 @@ from . import cli, exceptions, formats, time
 from .common import VERSION, Alignment, Color
 from .exceptions import *
 from .formats import whisper
+from .karaoke import (
+    KaraokeAlignment,
+    KaraokeConflict,
+    KaraokeWord,
+    align_event,
+    align_file,
+    align_text,
+)
 from .ssaevent import SSAEvent
 from .ssafile import SSAFile
 from .ssastyle import SSAStyle
@@ -10,9 +18,15 @@ __all__ = [
     "VERSION",
     "Alignment",
     "Color",
+    "KaraokeAlignment",
+    "KaraokeConflict",
+    "KaraokeWord",
     "SSAEvent",
     "SSAFile",
     "SSAStyle",
+    "align_event",
+    "align_file",
+    "align_text",
     "cli",
     "exceptions",
     "formats",

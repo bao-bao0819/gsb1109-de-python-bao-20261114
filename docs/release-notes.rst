@@ -1,6 +1,17 @@
 Release Notes
 =============
 
+**Unreleased**
+
+- Added word-level alignment for ASS karaoke lines in ``pysubs2.karaoke``
+  (``align_text``, ``align_event``, ``align_file``, plus ``SSAEvent.karaoke``
+  and ``SSAFile.align_karaoke()``). Records carry absolute timestamps, source
+  line, word order and beat index, so misaligned samples can be traced back to
+  the lyric line. Empty beats consume time without producing words, formatting
+  tags inside a word do not split it, and duration overflow is reported at the
+  first conflicting beat while earlier words remain usable.
+- Added ``--karaoke json|csv`` option to the CLI.
+
 **1.9.1** --- released on 2026-10-30
 
 - SRT parser is more conservative about removing subtitle indices (Issue #119)

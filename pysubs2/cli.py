@@ -94,6 +94,12 @@ class Pysubs2CLI:
         parser.add_argument("--clean", action="store_true",
                             help="Attempt to remove non-essential subtitles (eg. karaoke, SSA drawing tags), "
                                  "strip styling information when saving to non-SSA formats")
+        parser.add_argument("--karaoke", choices=("json", "csv"),
+                            help="Write a word-level alignment table from ASS karaoke tags to standard output "
+                                 "instead of converting subtitles. Conflicting lines are reported on standard error "
+                                 "and the command exits with status 1.")
+        parser.add_argument("--karaoke-comments", action="store_true",
+                            help="(output) with --karaoke, also include comment lines")
         parser.add_argument("--verbose", action="store_true",
                             help="Print misc logging")
 
@@ -169,6 +175,11 @@ class Pysubs2CLI:
 
                     self.process(subs, args)
 
+                    if args.karaoke is not None:
+                        if self.write_karaoke(subs, args):
+                            errors += 1
+                        continue
+
                     if args.output_format is None:
                         outpath = inpath
                         output_format = subs.format
@@ -192,6 +203,10 @@ class Pysubs2CLI:
 
             subs = SSAFile.from_file(infile, args.input_format, fps=args.fps)
             self.process(subs, args)
+            if args.karaoke is not None:
+                if self.write_karaoke(subs, args):
+                    errors += 1
+                return 0 if errors == 0 else 1
             output_format = args.output_format or subs.format
             assert output_format is not None, "output_format must not be None (it's either given or inferred at read time)"
             subs.to_file(outfile, output_format, fps=args.fps, apply_styles=not args.clean)
@@ -200,6 +215,23 @@ class Pysubs2CLI:
             errors += 1
 
         return 0 if errors == 0 else 1
+
+    @staticmethod
+    def write_karaoke(subs: SSAFile, args: argparse.Namespace) -> bool:
+        """Write karaoke alignment to stdout; return True if conflicts were found."""
+        from .karaoke import align_file
+
+        alignment = align_file(subs, include_comments=args.karaoke_comments)
+        if args.karaoke == "csv":
+            sys.stdout.write(alignment.to_csv())
+        else:
+            sys.stdout.write(alignment.to_json(indent=2))
+            sys.stdout.write("\n")
+
+        for conflict in alignment.conflicts:
+            print(f"warning: {conflict.message}", file=sys.stderr)
+
+        return bool(alignment.conflicts)
 
     @staticmethod
     def process(subs: SSAFile, args: argparse.Namespace) -> None:

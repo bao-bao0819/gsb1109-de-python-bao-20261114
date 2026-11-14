@@ -1,10 +1,13 @@
 import dataclasses
 import re
 import warnings
-from typing import Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from .common import IntOrFloat
 from .time import make_time, ms_to_str
+
+if TYPE_CHECKING:
+    from .karaoke import KaraokeAlignment
 
 
 @dataclasses.dataclass(repr=False, eq=False, order=False)
@@ -108,6 +111,17 @@ class SSAEvent:
         In general, for non-SSA formats these events should be ignored.
         """
         return not (self.is_comment or self.is_drawing)
+
+    @property
+    def karaoke(self) -> "KaraokeAlignment":
+        """
+        Word-level alignment of this karaoke line (read-only property).
+
+        The event text must use SubStation ``\\k``-family tags. See
+        :func:`pysubs2.align_event` for timing rules and conflict reporting.
+        """
+        from .karaoke import align_event
+        return align_event(self)
 
     @property
     def plaintext(self) -> str:

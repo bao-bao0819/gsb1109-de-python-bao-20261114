@@ -15,6 +15,18 @@ See ``pysubs2 --help`` for usage. Here are some examples::
     pysubs2 --shift 0.3s <my_file.srt >retimed_file.srt
     pysubs2 --shift-back 0.3s --output-dir retimed *.srt
     pysubs2 --transform-framerate 25 23.976 *.srt
+    pysubs2 --karaoke json lyrics.ass > words.json
+    pysubs2 --karaoke csv lyrics.ass > words.csv
+
+The ``--karaoke`` option does not convert subtitles. Instead, it writes a word-level alignment table
+built from ASS karaoke tags (``\k``, ``\kf``, ``\ko``) to standard output, in JSON (default) or CSV.
+Each word carries its absolute start/end time, original line, line index and word index, so bad samples
+can be traced back to the lyric line. Empty beats consume time but are not emitted as words; formatting
+tags inside a word do not split it.
+
+If karaoke durations run past the end of a line, the words before the first conflicting beat are still
+written, the conflict is reported on standard error with its beat number, and the exit status is 1.
+Use ``--karaoke-comments`` to include comment lines.
 
 For formats other than SubStation, comment and drawing lines will be skipped. If you'd like a bit more
 aggressive skipping, try the ``--clean`` option, which will also try to skip karaoke and duplicated lines.

@@ -51,6 +51,33 @@ Individual subtitles are :class:`pysubs2.SSAEvent` objects and have the attribut
     there was a SubRip file
     with two subtitles.
 
+Word-level alignment from karaoke
+---------------------------------
+
+Karaoke lines use ``\k`` tags with durations in centiseconds. You can turn them into
+a table of words with absolute timestamps:
+
+    >>> ev = pysubs2.SSAEvent(start=10000, end=13000,
+    ...                       text=r"{\k50}{\k50}SUN{\i1}DAY{\i0}{\k50} night")
+    >>> for word in ev.karaoke:
+    ...     print(word.text, word.start, word.end, word.word_index)
+    SUNDAY 10500 11000 0
+    night 11000 11500 1
+
+The second beat is empty and only advances time; the italic tag inside ``SUNDAY``
+does not split the word. If the tagged durations run past the line end, alignment
+stops at the first beat that would overflow, keeps the earlier words, and reports
+the conflict:
+
+    >>> result = pysubs2.align_event(
+    ...     pysubs2.SSAEvent(start=0, end=250, text=r"{\k10}one{\k10}two{\k10}three"))
+    >>> [w.text for w in result]
+    ['one', 'two']
+    >>> result.first_conflict.beat_number
+    3
+
+Use ``pysubs2.align_file(subs)`` (or the ``--karaoke`` CLI option) for a whole file.
+
 A point about character encoding
 ################################
 

@@ -5,7 +5,7 @@ import logging
 from collections.abc import Iterable, Iterator, MutableSequence
 from itertools import chain
 from pathlib import Path
-from typing import Any, ClassVar, Literal, TextIO, Unpack, overload, override
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, TextIO, Unpack, overload, override
 
 from .common import IntOrFloat, PathOrStr
 from .formats.jsonformat import JSONFormat
@@ -21,6 +21,9 @@ from .formats.whisper import WhisperJAXFormat
 from .ssaevent import SSAEvent
 from .ssastyle import SSAStyle
 from .time import make_time, ms_to_str
+
+if TYPE_CHECKING:
+    from .karaoke import KaraokeAlignment
 
 logger = logging.getLogger(__name__)
 
@@ -1072,6 +1075,24 @@ class SSAFile(MutableSequence[SSAEvent]):
         Return list of events excluding SSA comment lines and lines with SSA drawing tags
         """
         return [e for e in self if e.is_text]
+
+    def align_karaoke(self, *, include_comments: bool = False) -> "KaraokeAlignment":
+        """
+        Build a word-level alignment table from karaoke lines in this file.
+
+        This is a convenience wrapper around :func:`pysubs2.align_file`. Events
+        are skipped if they are drawings, and comment lines are skipped unless
+        ``include_comments`` is true.
+
+        Arguments:
+            include_comments (bool): Also align comment events.
+
+        Returns:
+            :class:`pysubs2.KaraokeAlignment` with :class:`pysubs2.KaraokeWord`
+            records and any :class:`pysubs2.KaraokeConflict` reports.
+        """
+        from .karaoke import align_file
+        return align_file(self, include_comments=include_comments)
 
     def equals(self, other: "SSAFile") -> bool:
         """

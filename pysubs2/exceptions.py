@@ -1,7 +1,13 @@
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .karaoke import KaraokeAlignment, KaraokeConflict
 
 __all__ = [
     "FormatAutodetectionError",
+    "KaraokeError",
+    "KaraokeOverflowError",
+    "KaraokeTimingError",
     "Pysubs2Error",
     "UnknownFPSError",
     "UnknownFileExtensionError",
@@ -82,3 +88,42 @@ class FormatAutodetectionError(Pysubs2Error):
 
     def __reduce__(self) -> Any:
         return self.__class__, (self.content, self.formats)
+
+
+class KaraokeError(Pysubs2Error):
+    """Base class for errors related to karaoke timing."""
+
+
+class KaraokeTimingError(KaraokeError):
+    """
+    Karaoke timing is inconsistent with the subtitle line.
+
+    The error is raised only in strict mode.  It always carries the alignment
+    result, including the words which could be aligned before the conflict.
+
+    Attributes:
+        conflict: The first :class:`pysubs2.KaraokeConflict` found.
+        alignment: :class:`pysubs2.KaraokeAlignment` with partial results.
+        beat_index: Zero-based index of the first conflicting beat.
+        word_index: Number of words accepted before the conflict.
+        words: Accepted words (alias for ``alignment.words``).
+    """
+
+    def __init__(self, conflict: "KaraokeConflict", alignment: "KaraokeAlignment") -> None:
+        self.conflict = conflict
+        self.alignment = alignment
+        self.beat_index = conflict.beat_index
+        self.word_index = conflict.word_index
+        super().__init__(conflict.message)
+
+    @property
+    def words(self) -> list[Any]:
+        """Words aligned before the conflict."""
+        return self.alignment.words
+
+    def __reduce__(self) -> Any:
+        return self.__class__, (self.conflict, self.alignment)
+
+
+class KaraokeOverflowError(KaraokeTimingError):
+    """Karaoke beat durations extend past the end of the subtitle line."""
