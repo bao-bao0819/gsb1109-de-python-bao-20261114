@@ -2,6 +2,105 @@ from random import uniform, randint
 import time
 
 import polyline
+from polyline import Checkpoint
+
+import pytest
+
+
+AUDIT_TRACK = [
+    (40.641, -8.654),
+    (40.642, -8.655),
+    (40.643, -8.654),
+    (40.644, -8.656),
+    (40.645, -8.655),
+    (40.646, -8.657),
+    (40.647, -8.656),
+    (40.648, -8.658)
+]
+AUDIT_EXPRESSION = polyline.encode(AUDIT_TRACK)
+# Per-point end offsets in AUDIT_EXPRESSION.
+AUDIT_OFFSETS = [10, 14, 18, 22, 26, 30, 34, 38]
+# Corruption of the first char of point 3 ('g' -> '_' at offset 18): every
+# subsequent absolute position decoded naively is shifted.
+AUDIT_CORRUPTED = AUDIT_EXPRESSION[:18] + '_' + AUDIT_EXPRESSION[19:]
+
+
+def _checkpoints(*indices):
+    return [Checkpoint(offset=AUDIT_OFFSETS[i], index=i, coord=AUDIT_TRACK[i])
+            for i in indices]
+
+
+def test_audit_clean_track_fully_confirmed():
+    report = polyline.audit(AUDIT_EXPRESSION, _checkpoints(2, 5, 7))
+    assert [s.status for s in report.segments] == [
+        polyline.CONFIRMED, polyline.CONFIRMED, polyline.CONFIRMED
+    ]
+    assert report.track == AUDIT_TRACK
+
+
+def test_audit_corruption_marks_single_suspicious_segment():
+    report = polyline.audit(AUDIT_CORRUPTED, _checkpoints(1, 4, 7))
+    statuses = [(s.status, s.start_index, s.end_index) for s in report.segments]
+    assert statuses == [
+        (polyline.CONFIRMED, 0, 1),
+        (polyline.SUSPICIOUS, 2, 4),
+        (polyline.CONFIRMED, 5, 7)
+    ]
+    # The suspicious segment carries no positions.
+    assert report.segments[1].coordinates is None
+    # Points before and after the corrupted stretch stay ingestible.
+    assert report.track == AUDIT_TRACK[:2] + [None] * 3 + AUDIT_TRACK[5:]
+
+
+def test_audit_naive_decode_drifts_but_audit_resyncs():
+    # Plain decoding of the corrupted string still yields numbers,
+    # but every position after the corruption is off.
+    assert polyline.decode(AUDIT_CORRUPTED) != AUDIT_TRACK
+    report = polyline.audit(AUDIT_CORRUPTED, _checkpoints(1, 4, 7))
+    # Decoding resumes from each checkpoint, so the tail lines up again.
+    assert report.segments[2].coordinates == AUDIT_TRACK[5:]
+
+
+def test_audit_restartable_suffix_after_last_checkpoint():
+    report = polyline.audit(AUDIT_CORRUPTED, _checkpoints(1, 3))
+    statuses = [(s.status, s.start_index, s.end_index) for s in report.segments]
+    assert statuses == [
+        (polyline.CONFIRMED, 0, 1),
+        (polyline.SUSPICIOUS, 2, 3),
+        (polyline.RESTARTABLE, 4, 7)
+    ]
+    assert report.segments[2].coordinates == AUDIT_TRACK[4:]
+    assert report.track == AUDIT_TRACK[:2] + [None] * 2 + AUDIT_TRACK[4:]
+
+
+def test_audit_without_checkpoints_is_restartable_from_origin():
+    report = polyline.audit(AUDIT_EXPRESSION, [])
+    assert len(report.segments) == 1
+    segment = report.segments[0]
+    assert segment.status == polyline.RESTARTABLE
+    assert (segment.start_index, segment.end_index) == (0, len(AUDIT_TRACK) - 1)
+    assert report.track == AUDIT_TRACK
+
+
+def test_audit_geojson():
+    checkpoints = [Checkpoint(offset=AUDIT_OFFSETS[3], index=3,
+                              coord=(-8.656, 40.644))]
+    report = polyline.audit(AUDIT_EXPRESSION, checkpoints, geojson=True)
+    assert report.segments[0].status == polyline.CONFIRMED
+    assert report.track[0] == (-8.654, 40.641)
+    assert report.track[3] == (-8.656, 40.644)
+
+
+def test_audit_checkpoint_offset_must_match_point_boundary():
+    with pytest.raises(ValueError):
+        polyline.audit(AUDIT_EXPRESSION,
+                       [Checkpoint(offset=3, index=1, coord=AUDIT_TRACK[1])])
+
+
+def test_audit_checkpoint_index_out_of_range():
+    with pytest.raises(ValueError):
+        polyline.audit(AUDIT_EXPRESSION,
+                       [Checkpoint(offset=99, index=99, coord=(0, 0))])
 
 
 def test_decode_multiple_points():

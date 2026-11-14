@@ -55,6 +55,27 @@ You can set the required precision with the optional ``precision`` parameter. Th
 
 You can decode into (lon, lat) tuples by setting ``geojson=True``.
 
+Auditing
+^^^^^^^^
+
+Because the format is delta-encoded, a single corrupted character shifts the
+absolute position of every point after it, even though decoding still produces
+numbers. If you have an independent record of a few points (string offset,
+point index and absolute coordinate), ``audit`` splits the track into confirmed,
+suspicious and restartable segments::
+
+    import polyline
+    checkpoints = [polyline.Checkpoint(offset=14, index=1, coord=(40.642, -8.655)),
+                   polyline.Checkpoint(offset=26, index=4, coord=(40.645, -8.655))]
+    report = polyline.audit('gu`wFnfys@gE_EnKgEgE...', checkpoints)
+
+Segments between two anchors that decode onto the closing anchor are
+``CONFIRMED``; a mismatching segment is only marked ``SUSPICIOUS`` as a whole —
+the end value cannot identify a unique bad character, so no repair is attempted
+and its positions are reported as ``None`` in ``report.track``. Decoding resumes
+from each checkpoint's trusted coordinate, so the suffix after the last anchor
+is ``RESTARTABLE`` and parts that line up again at later anchors remain
+ingestible.
 
 Development
 -----------
