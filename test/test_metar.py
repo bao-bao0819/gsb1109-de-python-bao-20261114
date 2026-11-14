@@ -848,3 +848,160 @@ def test_issue167_impossible_day_still_raises(monkeypatch):
     _fixed_now(monkeypatch, datetime(2026, 1, 15, 12, 0))
     with pytest.raises(Metar.ParserError):
         Metar.Metar("KUAO 320053Z AUTO 31009KT 10SM -RA FEW046 BKN055 OVC070 05/00")
+
+
+def _loose(code):
+    """Parse in loose mode, suppressing the unparsed-group warning."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return Metar.Metar(code, strict=False)
+
+
+def test_parse_detail_recognized_values_point_back_to_their_groups():
+    """Every recognized value is traced to its source group and position."""
+    code = (
+        "METAR KEWR 111851Z VRB03G19KT 2SM TSRA BR FEW015 BKN040CB 22/22 A2987 "
+        "RMK AO2 SLP114 T02270215"
+    )
+    report = Metar.Metar(code)
+
+    assert report.unparsed_elements == []
+    elements = report.parsed_elements
+    assert elements
+
+    original = report.code
+    previous_index = -1
+    previous_start = -1
+    for record in elements:
+        # Offsets slice back to exactly the reported group in the raw code.
+        assert original[record.start:record.end] == record.group
+        assert record.start >= previous_start
+        assert record.index >= previous_index
+        previous_start = record.start
+        previous_index = record.index
+        assert record.section in ("body", "remark", "trend", Metar.UNKNOWN)
+
+    wind = next(r for r in elements if r.element == "wind_speed")
+    assert wind.section == "body"
+    assert wind.group == "VRB03G19KT"
+    assert wind.attribute == "wind_speed"
+    assert wind.value is report.wind_speed
+
+    slp = next(r for r in elements if r.element == "sea_level_pressure")
+    assert slp.section == "remark"
+    assert slp.group == "SLP114"
+    assert slp.value is report.press_sea_level
+    assert slp.index > wind.index
+
+
+def test_parse_detail_loose_mode_records_unparsed_body_group():
+    """A corrupt body group is listed by position with candidate elements."""
+    code = "K9L2 100958Z AUTO 33006KT 10SM CLR M A3007 RMK AO2 SLPNO $"
+    report = _loose(code)
+
+    assert not report.decode_completed
+    bad = next(u for u in report.unparsed_elements if u.group == "M")
+    assert bad.section == "body"
+    assert bad.index == 6
+    assert report.code[bad.start:bad.end] == "M"
+    assert "weather" in bad.elements
+    assert "temperature" in bad.elements
+
+    parsed_indices = [r.index for r in report.parsed_elements]
+    assert max(parsed_indices) > bad.index
+    assert min(parsed_indices) < bad.index
+
+
+def test_parse_detail_offsets_are_relative_to_raw_code():
+    """Leading whitespace shifts offsets but not token indices."""
+    raw = "  KEWR 101651Z 00000KT 10SM 20/20 A3000"
+    report = Metar.Metar(raw)
+
+    first = report.parsed_elements[0]
+    assert first.group == "KEWR"
+    assert first.index == 0
+    assert report.code[first.start:first.end] == "KEWR"
+    assert first.start == 2
+
+
+def test_parse_detail_duplicate_phrase_keeps_distinct_positions():
+    """The same phrase in the body and in remarks locates each occurrence."""
+    code = "KEWR 101651Z 00000KT 10SM RA 20/20 A3000 RMK RA OBSVD"
+    report = _loose(code)
+
+    body_ra = next(r for r in report.parsed_elements if r.group == "RA")
+    assert body_ra.section == "body"
+    assert body_ra.element == "weather"
+
+    remark_ra = next(u for u in report.unparsed_elements if u.group == "RA")
+    assert remark_ra.section == "remark"
+
+    assert body_ra.group == remark_ra.group == "RA"
+    assert body_ra.index != remark_ra.index
+    assert body_ra.start != remark_ra.start
+    assert remark_ra.index > body_ra.index
+    assert "precipitation_1hr" in remark_ra.elements
+
+
+def test_parse_detail_unknown_section_when_no_remark_marker():
+    """Without RMK, a trailing token after pressure cannot be attributed."""
+    code = "KCOF 281855Z 09008KT 7SM 32/25 A3008 SLP186 VIRGA"
+    report = _loose(code)
+
+    stray = next(u for u in report.unparsed_elements if u.group == "VIRGA")
+    assert stray.section == Metar.UNKNOWN
+    assert "weather" in stray.elements
+    assert "lightning" in stray.elements
+
+
+def test_parse_detail_trend_groups_are_tagged_separately():
+    """Trend forecast groups are recorded with a trend section."""
+    code = (
+        "METAR WSSS 280900Z 26009KT 0600 24/23 Q1010 "
+        "BECMG FM0920 TL0930 3000 TSRA"
+    )
+    report = Metar.Metar(code)
+
+    trend = [r for r in report.parsed_elements if r.section == "trend"]
+    assert {r.group for r in trend} == {
+        "BECMG",
+        "FM0920",
+        "TL0930",
+        "3000",
+        "TSRA",
+    }
+
+    body_wind = next(r for r in report.parsed_elements if r.element == "wind_speed")
+    assert body_wind.section == "body"
+    assert all(r.index > body_wind.index for r in trend)
+
+
+def test_parse_detail_accessors_return_independent_copies():
+    """The detail accessors hand back copies and serializable dicts."""
+    report = Metar.Metar("KEWR 101651Z 00000KT 10SM 20/20 A3000 RMK AO2")
+
+    parsed = report.parsed_elements
+    assert parsed == report.parsed_elements
+    assert parsed is not report.parsed_elements
+    parsed.clear()
+    assert report.parsed_elements
+
+    detail = report.parse_detail()
+    assert set(detail) == {"parsed", "unparsed"}
+    assert set(detail["parsed"][0]) == {
+        "index",
+        "start",
+        "end",
+        "group",
+        "section",
+        "element",
+        "attribute",
+        "value",
+    }
+
+
+def test_parse_detail_strict_mode_still_raises():
+    """Strict reading keeps its original error behavior."""
+    code = "K9L2 100958Z AUTO 33006KT 10SM CLR M A3007 RMK AO2 $"
+    with pytest.raises(Metar.ParserError):
+        Metar.Metar(code)

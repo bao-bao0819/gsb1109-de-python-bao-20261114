@@ -10,6 +10,7 @@ import calendar
 import datetime
 import warnings
 import logging
+from dataclasses import asdict, dataclass, field
 
 from metar import __version__, __author__, __email__, __LICENSE__
 from metar.Datatypes import (
@@ -30,6 +31,102 @@ class ParserError(Exception):
     """Exception raised when an unparseable group is found in body of the report."""
 
     pass
+
+
+# Sentinel used in the parse-detail records when an observation's section or
+# the element a group might carry cannot be determined from its position.
+UNKNOWN = "UNKNOWN"
+
+
+@dataclass
+class ParsedElement:
+    """
+    A single value recognized while decoding a report.
+
+    Each record ties one decoded observation back to the exact group it came
+    from, so identical phrases occurring in different parts of the report keep
+    their own position.
+
+    Attributes
+    ----------
+    index : int
+        Zero-based position of the source group's first token among all
+        whitespace-delimited tokens of the report.
+    start : int
+        Zero-based character offset of the source group within the original
+        report string (``self.code``).
+    end : int
+        Character offset just past the source group within the original
+        report string (``self.code``).
+    group : str
+        The source group, exactly as it appeared in the report.
+    section : str
+        Where the group was found: ``"body"``, ``"remark"`` or ``"trend"``;
+        set to :data:`UNKNOWN` when it cannot be established.
+    element : str
+        Name of the decoded observation (e.g. ``"wind_speed"``).
+    attribute : str or None
+        The ``Metar`` attribute that stores the value, or ``None`` when the
+        observation only contributes a textual remark.
+    value : object
+        The decoded value (a ``Datatypes`` object, scalar or tuple); may be
+        ``None`` for groups that are recognized but not retained.
+    """
+
+    index: int
+    start: int
+    end: int
+    group: str
+    section: str
+    element: str
+    attribute: object
+    value: object
+
+    def as_dict(self):
+        """Return this record as a plain dictionary."""
+        return asdict(self)
+
+
+@dataclass
+class UnparsedElement:
+    """
+    A group that could not be decoded.
+
+    The position fields locate the fragment in the report while ``elements``
+    lists the observations that a group in this section could plausibly carry,
+    which helps an archiver tell genuine missing reports from corrupt groups.
+
+    Attributes
+    ----------
+    index : int
+        Zero-based position of the group's first token among all
+        whitespace-delimited tokens of the report.
+    start : int
+        Zero-based character offset of the group within the original report
+        string (``self.code``).
+    end : int
+        Character offset just past the group within the original report
+        string (``self.code``).
+    group : str
+        The unrecognized fragment, exactly as it appeared.
+    section : str
+        The section the group was found in (``"body"`` or ``"remark"``); set
+        to :data:`UNKNOWN` when it cannot be established.
+    elements : list of str
+        Observations a group in this section may affect; an empty list means
+        no specific element can be suggested.
+    """
+
+    index: int
+    start: int
+    end: int
+    group: str
+    section: str
+    elements: list = field(default_factory=list)
+
+    def as_dict(self):
+        """Return this record as a plain dictionary."""
+        return asdict(self)
 
 
 # regular expressions to decode various groups of the METAR code
@@ -350,6 +447,50 @@ def _unparsedGroup(self, d):
 debug = False
 
 
+# Observations that an unrecognized group in a given section might carry.
+# These are deliberately broad: an unparsed body group could be any of the
+# main-body elements depending on where it sits, while remark groups map to
+# the remark-only observations.
+BODY_ELEMENTS = [
+    "type",
+    "correction",
+    "station_id",
+    "time",
+    "mod",
+    "wind",
+    "visibility",
+    "runway",
+    "weather",
+    "recent",
+    "sky",
+    "windshear",
+    "color",
+    "runway_state",
+    "temperature",
+    "pressure",
+    "trend",
+]
+
+REMARK_ELEMENTS = [
+    "auto",
+    "sea_level_pressure",
+    "peak_wind",
+    "wind_shift",
+    "lightning",
+    "thunderstorm_location",
+    "temperature_hourly",
+    "precipitation_1hr",
+    "precipitation_3hr",
+    "precipitation_6hr",
+    "precipitation_24hr",
+    "pressure_tendency_3hr",
+    "temperature_6hr",
+    "temperature_24hr",
+    "snow_depth",
+    "ice_accretion",
+]
+
+
 class Metar(object):
     """METAR (aviation meteorology report)"""
 
@@ -418,6 +559,21 @@ class Metar(object):
         self._unparsed_groups = []
         self._unparsed_remarks = []
 
+        # Position-indexed parse detail handed to the archive end. Every
+        # recognized value and every unrecognized fragment is traced back to
+        # its source group in the sanitized report.
+        self._sanitized_code = None
+        self._parsed_elements = []
+        self._unparsed_elements = []
+        # Records collected by the handler currently running; committed with
+        # the source-group position once the handler returns successfully.
+        self._pending_records = []
+        self._section = "body"
+        # Whether an explicit RMK marker opened the remarks section. When only
+        # a pressure group leads us to treat trailing tokens as remarks, their
+        # body-vs-remark attribution cannot be settled and stays UNKNOWN.
+        self._explicit_remarks = False
+
         self._now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
 
         self._month = month
@@ -425,6 +581,10 @@ class Metar(object):
 
         # Do some string prep before parsing
         code = _sanitize(self.code)
+        self._sanitized_code = code
+        # Leading whitespace removed by _sanitize(); offsets are reported
+        # relative to the original code, so positions are shifted by this.
+        self._offset_base = len(self.code) - len(self.code.lstrip())
         try:
             ngroup = len(self.handlers)
             igroup = 0
@@ -438,7 +598,8 @@ class Metar(object):
                     ifailed = -1
                     if debug:
                         _report_match(handler, m.group())
-                    handler(self, m.groupdict())
+                    self._section = "body"
+                    self._run_handler(handler, m, code)
                     code = code[m.end():]
                     if self._trend:
                         code = self._do_trend_handlers(code)
@@ -459,11 +620,24 @@ class Metar(object):
                     if debug:
                         _report_match(handler, m.group())
                     handler(self, m.groupdict())
+                    # Once the altimeter has been seen without an explicit RMK,
+                    # a leftover token could be a trailing body group or a
+                    # remark; its section cannot be settled.
+                    unparsed_section = (
+                        UNKNOWN if self.press and not self._explicit_remarks else "body"
+                    )
+                    self._record_unparsed(
+                        m.groupdict()["group"], unparsed_section, m, code
+                    )
                     code = code[m.end():]
                     igroup = ifailed
                     ifailed = -2  # if it's still -2 when we run out of main-body
                     #  groups, we'll try parsing this group as a remark
             if pattern == REMARK_RE or self.press:
+                # An explicit RMK marker makes the section unambiguous. When we
+                # only fall into remark parsing because a pressure group was
+                # seen, trailing tokens cannot be assigned and stay UNKNOWN.
+                remark_section = "remark" if self._explicit_remarks else UNKNOWN
                 while code:
                     for pattern, handler in self.remark_handlers:
                         if debug:
@@ -472,7 +646,15 @@ class Metar(object):
                         if m:
                             if debug:
                                 _report_match(handler, m.group())
-                            handler(self, m.groupdict())
+                            self._section = remark_section
+                            self._run_handler(handler, m, code)
+                            if handler.__name__ == "_unparsedRemark":
+                                self._record_unparsed(
+                                    m.groupdict()["group"],
+                                    remark_section,
+                                    m,
+                                    code,
+                                )
                             code = pattern.sub("", code, 1)
                             break
 
@@ -505,6 +687,115 @@ class Metar(object):
         """
         return not self._unparsed_groups
 
+    def _record(self, element, value, attribute=None):
+        """
+        Queue a recognized value while a group handler is running.
+
+        The queued record is tied to the handler's source group (and its
+        position) by :meth:`_run_handler` once the handler succeeds.
+        """
+        self._pending_records.append((element, attribute, value))
+
+    def _group_position(self, match, code):
+        """Return ``(index, start, end)`` for a match at the head of ``code``."""
+        base = len(self._sanitized_code) - len(code)
+        start = self._offset_base + base + match.start()
+        # The regexes consume the separating whitespace too; trim it so the
+        # end offset lands on the group's last character, not the space.
+        end = start + len(match.group().rstrip())
+        index = len(self._sanitized_code[:base + match.start()].split())
+        return index, start, end
+
+    def _run_handler(self, handler, match, code):
+        """
+        Run a group handler and commit its records against the source group.
+        """
+        self._pending_records = []
+        handler(self, match.groupdict())
+        index, start, end = self._group_position(match, code)
+        group = match.group().strip()
+        for element, attribute, value in self._pending_records:
+            self._parsed_elements.append(
+                ParsedElement(
+                    index=index,
+                    start=start,
+                    end=end,
+                    group=group,
+                    section=self._section,
+                    element=element,
+                    attribute=attribute,
+                    value=value,
+                )
+            )
+        self._pending_records = []
+
+    def _record_unparsed(self, group, section, match=None, code=None):
+        """
+        Record an unrecognized fragment and the elements it may affect.
+        """
+        if match is not None and code is not None:
+            index, start, end = self._group_position(match, code)
+        else:
+            index = len(self._sanitized_code.split())
+            start = self._offset_base + len(self._sanitized_code.rstrip())
+            end = start
+        if section == "remark":
+            elements = list(REMARK_ELEMENTS)
+        elif section == "body":
+            elements = list(BODY_ELEMENTS)
+        else:
+            # The section is unknown, so either family of elements may apply.
+            elements = list(BODY_ELEMENTS) + list(REMARK_ELEMENTS)
+        self._unparsed_elements.append(
+            UnparsedElement(
+                index=index,
+                start=start,
+                end=end,
+                group=group,
+                section=section,
+                elements=elements,
+            )
+        )
+
+    @property
+    def parsed_elements(self):
+        """
+        Position-indexed records of every recognized value, in source order.
+
+        Returns a list of :class:`ParsedElement` records. Each value points
+        back to the group it was decoded from, including its section and
+        character offsets, so identical phrases in the body and remarks keep
+        distinct positions.
+        """
+        return list(self._parsed_elements)
+
+    @property
+    def unparsed_elements(self):
+        """
+        Position-indexed records of every unrecognized fragment.
+
+        Returns a list of :class:`UnparsedElement` records. Each record names
+        the section the fragment was found in and the observations a group in
+        that section may affect; the section is :data:`UNKNOWN` when it cannot
+        be established.
+        """
+        return list(self._unparsed_elements)
+
+    def parse_detail(self):
+        """
+        Return the full parse detail as an archive-ready mapping.
+
+        The two lists are ordered by the groups' positions in the report.
+        Records are plain dictionaries (nested lists/dicts for the element
+        lists); each record's ``value`` holds the decoded object, which an
+        archiver can render as needed before serializing to JSON or similar
+        formats.
+        """
+        return {
+            "parsed": [record.as_dict() for record in self._parsed_elements],
+            "unparsed": [record.as_dict() for record in self._unparsed_elements],
+        }
+
     def _do_trend_handlers(self, code):
         for pattern, handler, repeatable in self.trend_handlers:
             if debug:
@@ -514,7 +805,8 @@ class Metar(object):
                 if debug:
                     _report_match(handler, m.group())
                 self._trend_groups.append(m.group().strip())
-                handler(self, m.groupdict())
+                self._section = "trend"
+                self._run_handler(handler, m, code)
                 code = code[m.end():]
                 if not repeatable:
                     break
@@ -532,6 +824,7 @@ class Metar(object):
             type   [string]
         """
         self.type = d["type"]
+        self._record("type", self.type, "type")
 
     def _handleCorrection(self, d):
         """
@@ -541,6 +834,7 @@ class Metar(object):
             correction   [string]
         """
         self.correction = d["cor"]
+        self._record("correction", self.correction, "correction")
 
     def _handleStation(self, d):
         """
@@ -550,6 +844,7 @@ class Metar(object):
             station_id   [string]
         """
         self.station_id = d["station"]
+        self._record("station_id", self.station_id, "station_id")
 
     def _handleModifier(self, d):
         """
@@ -564,6 +859,7 @@ class Metar(object):
         if mod == "NIL" or mod == "FINO":
             mod = "NO DATA"
         self.mod = mod
+        self._record("mod", self.mod, "mod")
 
     def _handleTime(self, d):
         """
@@ -613,6 +909,7 @@ class Metar(object):
             self.cycle = self._hour
         else:
             self.cycle = self._hour + 1
+        self._record("time", self.time, "time")
 
     def _handleWind(self, d):
         """
@@ -628,6 +925,7 @@ class Metar(object):
         wind_dir = d["dir"].replace("O", "0")
         if wind_dir != "VRB" and wind_dir != "///" and wind_dir != "MMM":
             self.wind_dir = direction(wind_dir)
+            self._record("wind_dir", self.wind_dir, "wind_dir")
         wind_speed = d["speed"].replace("O", "0")
         units = d["units"]
         # Ambiguous METAR when no wind speed units are provided
@@ -644,15 +942,21 @@ class Metar(object):
             self.wind_speed = speed(wind_speed[1:], units, ">")
         elif not MISSING_RE.match(wind_speed):
             self.wind_speed = speed(wind_speed, units)
+        if self.wind_speed is not None:
+            self._record("wind_speed", self.wind_speed, "wind_speed")
         if d["gust"]:
             wind_gust = d["gust"]
             if wind_gust.startswith("P"):
                 self.wind_gust = speed(wind_gust[1:], units, ">")
             elif not MISSING_RE.match(wind_gust):
                 self.wind_gust = speed(wind_gust, units)
+            if self.wind_gust is not None:
+                self._record("wind_gust", self.wind_gust, "wind_gust")
         if d["varfrom"]:
             self.wind_dir_from = direction(d["varfrom"])
             self.wind_dir_to = direction(d["varto"])
+            self._record("wind_dir_from", self.wind_dir_from, "wind_dir_from")
+            self._record("wind_dir_to", self.wind_dir_to, "wind_dir_to")
 
     def _handleVisibility(self, d):
         """
@@ -684,10 +988,16 @@ class Metar(object):
             if vis_dir:
                 self.max_vis_dir = direction(vis_dir)
             self.max_vis = distance(vis_dist, vis_units, vis_less)
+            if vis_dir:
+                self._record("max_vis_dir", self.max_vis_dir, "max_vis_dir")
+            self._record("max_vis", self.max_vis, "max_vis")
         else:
             if vis_dir:
                 self.vis_dir = direction(vis_dir)
             self.vis = distance(vis_dist, vis_units, vis_less)
+            if vis_dir:
+                self._record("vis_dir", self.vis_dir, "vis_dir")
+            self._record("vis", self.vis, "vis")
 
     def _handleRunway(self, d):
         """
@@ -715,6 +1025,12 @@ class Metar(object):
         self.runway.append([d["name"], low, high, unit])
         tendency = d["tendency"].strip("/")
         self.runway_tendencies.append(tendency if tendency in ("U", "D", "N") else None)
+        self._record("runway", self.runway[-1], "runway")
+        self._record(
+            "runway_tendency",
+            self.runway_tendencies[-1],
+            "runway_tendencies",
+        )
 
     def _handleWeather(self, d):
         """
@@ -736,6 +1052,7 @@ class Metar(object):
         obsci = d["obsc"]
         otheri = d["other"]
         self.weather.append((inteni, desci, preci, obsci, otheri))
+        self._record("weather", self.weather[-1], "weather")
 
     def _handleSky(self, d):
         """
@@ -762,6 +1079,7 @@ class Metar(object):
         if cloud == "///":
             cloud = ""
         self.sky.append((cover, height, cloud))
+        self._record("sky", self.sky[-1], "sky")
 
     def _handleTemp(self, d):
         """
@@ -775,8 +1093,10 @@ class Metar(object):
         dewpt = d["dewpt"]
         if temp and temp != "//" and temp != "XX" and temp != "MM":
             self.temp = temperature(temp)
+            self._record("temp", self.temp, "temp")
         if dewpt and dewpt != "//" and dewpt != "XX" and dewpt != "MM":
             self.dewpt = temperature(dewpt)
+            self._record("dewpt", self.dewpt, "dewpt")
 
     def _handlePressure(self, d):
         """
@@ -786,6 +1106,7 @@ class Metar(object):
             press    [int]
         """
         press = d["press"]
+        press_before = self.press
         if press != "////":
             press = float(press.replace("O", "0"))
             if d["unit"]:
@@ -804,6 +1125,8 @@ class Metar(object):
                 self.press = pressure(press / 100, "IN")
             else:
                 self.press = pressure(press, "HPA")
+        if self.press is not press_before:
+            self._record("press", self.press, "press")
 
     def _handleRecent(self, d):
         """
@@ -822,6 +1145,7 @@ class Metar(object):
         obsci = d["obsc"]
         otheri = d["other"]
         self.recent.append(("", desci, preci, obsci, otheri))
+        self._record("recent", self.recent[-1], "recent")
 
     def _handleWindShear(self, d):
         """
@@ -834,6 +1158,7 @@ class Metar(object):
             self.windshear.append(d["name"])
         else:
             self.windshear.append("ALL")
+        self._record("windshear", self.windshear[-1], "windshear")
 
     def _handleColor(self, d):
         """
@@ -842,7 +1167,7 @@ class Metar(object):
         The following attributes are set:
             trend    [list of strings]
         """
-        pass
+        self._record("color", None)
 
     def _handleRunwayState(self, d):
         """
@@ -850,7 +1175,7 @@ class Metar(object):
 
         The following attributes are set:
         """
-        pass
+        self._record("runway_state", d)
 
     def _handleTrend(self, d):
         """
@@ -858,13 +1183,21 @@ class Metar(object):
         """
         if "trend" in d:
             self._trend_groups.append(d["trend"])
+            value = d["trend"]
+            # The BECMG/TEMPO/... marker itself opens the trend section.
+            self._section = "trend"
+        else:
+            value = d
         self._trend = True
+        self._record("trend", value, "_trend_groups")
 
     def _startRemarks(self, d):
         """
         Found the start of the remarks section.
         """
         self._remarks = []
+        self._explicit_remarks = True
+        self._record("remark_indicator", None)
 
     def _handleSealvlPressRemark(self, d):
         """
@@ -876,6 +1209,9 @@ class Metar(object):
         else:
             value += 900
         self.press_sea_level = pressure(value, "HPA")
+        self._record(
+            "sea_level_pressure", self.press_sea_level, "press_sea_level"
+        )
 
     def _handlePrecip24hrRemark(self, d):
         """
@@ -885,15 +1221,19 @@ class Metar(object):
         if d["type"] == "6":
             if self.cycle in [3, 9, 15, 21]:
                 self.precip_3hr = precipitation(value, "IN")
+                self._record("precipitation_3hr", self.precip_3hr, "precip_3hr")
             else:
                 self.precip_6hr = precipitation(value, "IN")
+                self._record("precipitation_6hr", self.precip_6hr, "precip_6hr")
         else:
             self.precip_24hr = precipitation(value, "IN")
+            self._record("precipitation_24hr", self.precip_24hr, "precip_24hr")
 
     def _handlePrecip1hrRemark(self, d):
         """Parse an hourly precipitation remark group."""
         value = float(d["precip"]) / 100.0
         self.precip_1hr = precipitation(value, "IN")
+        self._record("precipitation_1hr", self.precip_1hr, "precip_1hr")
 
     def _handleTemp1hrRemark(self, d):
         """
@@ -905,11 +1245,13 @@ class Metar(object):
         if d["tsign"] == "1":
             value = -value
         self.temp = temperature(value)
+        self._record("temperature_hourly", self.temp, "temp")
         if d["dewpt"]:
             value2 = float(d["dewpt"]) / 10.0
             if d["dsign"] == "1":
                 value2 = -value2
             self.dewpt = temperature(value2)
+            self._record("dewpoint_hourly", self.dewpt, "dewpt")
 
     def _handleTemp6hrRemark(self, d):
         """
@@ -920,8 +1262,10 @@ class Metar(object):
             value = -value
         if d["type"] == "1":
             self.max_temp_6hr = temperature(value, "C")
+            self._record("temperature_6hr_max", self.max_temp_6hr, "max_temp_6hr")
         else:
             self.min_temp_6hr = temperature(value, "C")
+            self._record("temperature_6hr_min", self.min_temp_6hr, "min_temp_6hr")
 
     def _handleTemp24hrRemark(self, d):
         """
@@ -935,6 +1279,12 @@ class Metar(object):
             value2 = -value2
         self.max_temp_24hr = temperature(value, "C")
         self.min_temp_24hr = temperature(value2, "C")
+        self._record(
+            "temperature_24hr_max", self.max_temp_24hr, "max_temp_24hr"
+        )
+        self._record(
+            "temperature_24hr_min", self.min_temp_24hr, "min_temp_24hr"
+        )
 
     def _handlePress3hrRemark(self, d):
         """
@@ -942,7 +1292,9 @@ class Metar(object):
         """
         value = float(d["press"]) / 10.0
         descrip = PRESSURE_TENDENCY[d["tend"]]
-        self._remarks.append("3-hr pressure change %.1fhPa, %s" % (value, descrip))
+        text = "3-hr pressure change %.1fhPa, %s" % (value, descrip)
+        self._remarks.append(text)
+        self._record("pressure_tendency_3hr", text)
 
     def _handlePeakWindRemark(self, d):
         """
@@ -969,6 +1321,9 @@ class Metar(object):
             "peak wind %dkt from %d degrees at %d:%02d"
             % (peak_speed, peak_dir, peak_hour, peak_min)
         )
+        self._record("peak_wind_speed", self.wind_speed_peak, "wind_speed_peak")
+        self._record("peak_wind_dir", self.wind_dir_peak, "wind_dir_peak")
+        self._record("peak_wind_time", self.peak_wind_time, "peak_wind_time")
 
     def _handleWindShiftRemark(self, d):
         """
@@ -991,6 +1346,7 @@ class Metar(object):
         if d["front"]:
             text += " (front)"
         self._remarks.append(text)
+        self._record("wind_shift", self.wind_shift_time, "wind_shift_time")
 
     def _handleLightningRemark(self, d):
         """
@@ -1009,7 +1365,9 @@ class Metar(object):
             parts.append("(" + ",".join(ltg_types) + ")")
         if d["loc"]:
             parts.append(xlate_loc(d["loc"]))
-        self._remarks.append(" ".join(parts))
+        text = " ".join(parts)
+        self._remarks.append(text)
+        self._record("lightning", text)
 
     def _handleTSLocRemark(self, d):
         """
@@ -1021,15 +1379,21 @@ class Metar(object):
         if d["dir"]:
             text += " moving %s" % d["dir"]
         self._remarks.append(text)
+        self._record("thunderstorm_location", text)
 
     def _handleAutoRemark(self, d):
         """
         Parse an automatic station remark group.
         """
         if d["type"] == "1":
-            self._remarks.append("Automated station")
+            text = "Automated station"
         elif d["type"] == "2":
-            self._remarks.append("Automated station (type 2)")
+            text = "Automated station (type 2)"
+        else:
+            text = None
+        if text is not None:
+            self._remarks.append(text)
+            self._record("auto", text)
 
     def _handleSnowDepthRemark(self, d):
         """
@@ -1037,6 +1401,7 @@ class Metar(object):
         """
         self.snowdepth = distance(float(d["snowdepth"]), "IN")
         self._remarks.append(" snowdepth %s" % (self.snowdepth,))
+        self._record("snow_depth", self.snowdepth, "snowdepth")
 
     def _handleIceAccretionRemark(self, d):
         """
@@ -1045,6 +1410,7 @@ class Metar(object):
         myattr = "ice_accretion_%shr" % (d["ice_accretion_hours"],)
         value = precipitation(float(d["ice_accretion_depth"]) / 100.0, "IN")
         setattr(self, myattr, value)
+        self._record("ice_accretion", value, myattr)
 
     def _unparsedRemark(self, d):
         """

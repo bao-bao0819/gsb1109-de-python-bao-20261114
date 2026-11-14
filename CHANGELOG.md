@@ -1,6 +1,16 @@
 Change Log
 ==========
 
+Unreleased
+
+- Add position-indexed parse detail for loose-mode reports: `parsed_elements`
+  traces each recognized value back to its source group (with section and
+  character offsets), and `unparsed_elements` lists unrecognized fragments by
+  section with the observations they may affect; `parse_detail()` returns
+  both as plain mappings. Identical phrases in the body and remarks keep
+  distinct positions, and unattributable sections are retained as
+  `Metar.UNKNOWN`. Strict-mode error behavior is unchanged.
+
 metar-2.0.2 (26 October 2026)
 
 - Infer a month when METAR day is ambiguous and day of the month does not

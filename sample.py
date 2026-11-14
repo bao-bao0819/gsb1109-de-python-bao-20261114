@@ -62,6 +62,15 @@
 #    _remarks           remarks [list of strings]
 #    _unparsed_groups   unparsed groups [list of strings]
 #    _unparsed_remarks  unparsed remarks [list of strings]
+#
+#  Position-indexed parse detail (handy in loose mode, strict=False):
+#    parsed_elements    recognized values, each pointing at its source
+#                       group's index, offsets and section [list of
+#                       Metar.ParsedElement]
+#    unparsed_elements  unrecognized fragments with their section and the
+#                       observations that section may affect [list of
+#                       Metar.UnparsedElement]
+#    parse_detail()     both lists as plain, ordered mappings
 
 #
 #  The metar.Datatypes classes (temperature, pressure, precipitation,

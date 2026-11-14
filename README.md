@@ -141,6 +141,38 @@ METAR: METAR KEWR 111851Z VRB03G19KT 2SM R04R/3000VP6000FT TSRA BR FEW015 BKN040
 >>>>
 ```
 
+Parse detail
+------------------------------------------------------------------------
+
+In loose mode (`Metar.Metar(code, strict=False)`) a report with an
+unrecognised group is still returned. To tell genuine missing observations
+apart from corrupt groups, every recognized value and every unrecognized
+fragment is traced back to its position in the report.
+
+`obs.parsed_elements` holds `ParsedElement` records for the recognized
+values, and `obs.unparsed_elements` holds `UnparsedElement` records for the
+fragments that could not be decoded. Both lists are ordered by the source
+groups, and each record carries the group's zero-based `index`, its
+character `start`/`end` offsets, and the `section` (`"body"`, `"remark"` or
+`"trend"`). A recognized record also names the `element`, the Metar
+`attribute` that stores it, and the decoded `value`; an unrecognized record
+lists the observations its section may affect. When the body/remark section
+cannot be settled the section is `Metar.UNKNOWN`. The same phrase appearing
+in both the body and the remarks therefore produces two distinct records.
+
+```python
+>>> obs = Metar.Metar("KEWR 101651Z 00000KT 10SM RA 20/20 A3000 RMK RA", strict=False)
+>>> [(r.group, r.section, r.element) for r in obs.parsed_elements if r.group == "RA"]
+[('RA', 'body', 'weather')]
+>>> [(u.group, u.section) for u in obs.unparsed_elements if u.group == "RA"]
+[('RA', 'remark')]
+>>> obs.parse_detail()["unparsed"][0]["elements"][:3]
+['auto', 'sea_level_pressure', 'peak_wind']
+```
+
+Strict reading is unchanged: an unparseable body group still raises
+`Metar.ParserError`.
+
 Tests
 ------------------------------------------------------------------------
 
