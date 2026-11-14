@@ -370,6 +370,50 @@ map_geometries
   >>> geojson.dumps(new_point, sort_keys=True)
   '{"geometries": [{"coordinates": [[-115.81, 37.24]], "type": "MultiPoint"}], "type": "GeometryCollection"}'
 
+geometric equivalence
+~~~~~~~~~~~~~~~~~~~~~
+
+:code:`geojson.equivalence` compares geometries by their point sets instead of their JSON spelling.
+Linear rings ignore their starting point and winding direction, repeated closing points are tolerated,
+and polygon holes stay attached to the exterior ring that contains them.
+
+.. code:: python
+
+  >>> import geojson
+  >>> from geojson.equivalence import geometries_equal, geometry_key, merge_by_geometry
+
+  >>> first = geojson.Polygon([[(0, 0), (10, 0), (10, 10), (0, 10), (0, 0)]])
+  >>> second = geojson.Polygon([[(10, 10), (0, 10), (0, 0), (10, 0), (10, 10)]])
+
+  >>> geometries_equal(first, second)
+  True
+
+Holes are normalized only within their own exterior ring. Moving the same hole from one polygon
+of a MultiPolygon to another is therefore a geometry change, even if both faces use the same set of vertices.
+
+:code:`merge_by_geometry` consolidates features into one record per geometric equivalence class.
+Every declaration is retained. If two sources assign different administrative division codes to the
+same geometry, both declarations appear in the record and neither one is chosen as authoritative.
+
+.. code:: python
+
+  >>> features = [
+  ...     geojson.Feature(geometry=first, properties={"source": "a", "code": "110101"}),
+  ...     geojson.Feature(geometry=second, properties={"source": "b", "code": "110102"}),
+  ... ]
+
+  >>> records = merge_by_geometry(features)
+
+  >>> len(records)
+  1
+
+  >>> [(d["source"], d["codes"]["code"]) for d in records[0]["declarations"]]
+  [('a', '110101'), ('b', '110102')]
+
+Inputs can be Features, FeatureCollections, bare geometries, or mappings of source name to any of those.
+Use :code:`merge_to_features` to receive the merged records as a FeatureCollection, or
+:code:`deduplicate_geometries` when only the distinct canonical geometries are needed.
+
 validation
 ~~~~~~~~~~
 

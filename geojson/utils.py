@@ -1,5 +1,31 @@
 """Coordinate utility functions."""
 
+from geojson.equivalence import canonical_geometry, canonical_polygon
+from geojson.equivalence import canonical_ring, dedupe_features
+from geojson.equivalence import deduplicate_geometries, geometries_equal
+from geojson.equivalence import geometry_key, group_by_geometry
+from geojson.equivalence import merge_by_geometry, merge_to_features
+from geojson.equivalence import normalize_geometry
+
+__all__ = [
+    "coords",
+    "map_coords",
+    "map_tuples",
+    "map_geometries",
+    "generate_random",
+    "normalize_geometry",
+    "canonical_geometry",
+    "canonical_ring",
+    "canonical_polygon",
+    "geometry_key",
+    "geometries_equal",
+    "merge_by_geometry",
+    "group_by_geometry",
+    "deduplicate_geometries",
+    "merge_to_features",
+    "dedupe_features",
+]
+
 
 def coords(obj):
     """
