@@ -3,6 +3,13 @@ Detailed CHANGELOG
 
 olefile.py
 ----------
+* unreleased v0.47.dev7:
+    - added replace_streams (OleFileIO method and module-level helper) to apply
+      a group of equal-length stream replacements with old-content digest
+      preconditions, reject groups whose streams share storage regions, and
+      publish the result atomically as a new file while leaving the original
+      untouched; replayed groups after a lost receipt are recognized instead
+      of reported as conflicts
 * 2023-11-30 v0.47.dev6:
     - fixed issue #142: isOleFile has a new data parameter to handle files in memory properly
     - fixed issue #156: write_sect now correctly detects when data is larger than the sector size

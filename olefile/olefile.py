@@ -98,12 +98,22 @@ __all__ = ['isOleFile', 'OleFileIO', 'OleMetadata', 'enable_logging',
            'DEFECT_FATAL', 'DEFAULT_PATH_ENCODING',
            'MAXREGSECT', 'DIFSECT', 'FATSECT', 'ENDOFCHAIN', 'FREESECT',
            'MAXREGSID', 'NOSTREAM', 'UNKNOWN_SIZE', 'WORD_CLSID',
-           'OleFileIONotClosed'
+           'OleFileIONotClosed',
+           'StreamReplacement', 'StreamReplacementResult',
+           'StreamReplacementError', 'StreamPreconditionError',
+           'StreamOverlapError', 'OutputStreamConflictError',
+           'REPLACEMENT_APPLIED', 'REPLACEMENT_ALREADY_APPLIED',
+           'stream_digest', 'replace_streams', 'write_streams'
 ]
 
 import io
+import os
 import sys
 import struct, array, os.path, datetime, logging, warnings, traceback
+import hashlib
+import tempfile
+import errno
+import binascii
 
 #=== COMPATIBILITY WORKAROUNDS ================================================
 
@@ -402,6 +412,676 @@ class NotOleFileError(OleFileError):
     Error raised when the opened file is not an OLE file.
     """
     pass
+
+
+class StreamReplacementError(OleFileError, ValueError):
+    """
+    Error raised when a group of equal-length stream replacements cannot be
+    applied. This covers invalid replacement records and stream-level
+    preconditions, and is the base class of the more specific errors below.
+
+    It inherits from ValueError as well, so callers that validate replacement
+    arguments can keep catching ValueError.
+    """
+    pass
+
+
+class StreamPreconditionError(StreamReplacementError):
+    """
+    Error raised when the current contents of a stream do not match the digest
+    the caller supplied for the old contents (stale or missing stream, or an
+    existing output that was changed by someone else).
+
+    Attributes:
+
+        - stream_name: path of the stream that failed the check
+        - stream_path: tuple of path components
+        - expected_digest: digest of the old contents supplied by the caller
+        - actual_digest: digest computed from the stream, None if missing
+        - digest_algorithm: algorithm used for this check
+    """
+    def __init__(self, stream_name, expected_digest, actual_digest, message=None,
+                 digest_algorithm='sha256'):
+        self.stream_name = stream_name
+        self.stream_path = _normalize_stream_path(stream_name) \
+            if not isinstance(stream_name, tuple) else stream_name
+        self.expected_digest = expected_digest
+        self.actual_digest = actual_digest
+        self.digest_algorithm = digest_algorithm
+        if message is None:
+            message = "current contents of stream %r do not match the old digest" \
+                % ('/'.join(self.stream_path),)
+        StreamReplacementError.__init__(self, message)
+
+
+class StreamOverlapError(StreamReplacementError):
+    """
+    Error raised when two replacements in the same group resolve to storage
+    regions that overlap, or when the same stream is listed twice.
+
+    Attributes:
+
+        - stream_names: the two conflicting stream paths, as tuples
+    """
+    def __init__(self, first, second, message=None):
+        self.stream_names = (tuple(first), tuple(second))
+        if message is None:
+            message = "streams %r and %r cannot be replaced together: " \
+                "their storage regions overlap" \
+                % ('/'.join(self.stream_names[0]), '/'.join(self.stream_names[1]))
+        StreamReplacementError.__init__(self, message)
+
+
+class OutputStreamConflictError(StreamReplacementError):
+    """
+    Error raised when the output path already exists but does not hold either
+    the original file or the expected result of this exact group. Refusing to
+    overwrite it protects concurrent or unrelated output.
+
+    Attributes:
+
+        - output_path: the path that was refused
+    """
+    def __init__(self, output_path, message=None):
+        self.output_path = output_path
+        if message is None:
+            message = "output file %r already exists and does not match this " \
+                "replacement group" % (output_path,)
+        StreamReplacementError.__init__(self, message)
+
+
+#: status of a replacement that was published by this call
+REPLACEMENT_APPLIED = 'applied'
+#: status of a replacement that had already been published by an earlier
+#: identical call (the caller is retrying after losing the receipt)
+REPLACEMENT_ALREADY_APPLIED = 'already_applied'
+
+
+class StreamReplacement(object):
+    """
+    One equal-length stream replacement in a :meth:`OleFileIO.replace_streams`
+    group.
+
+    :param stream_name: path of the stream, as a string using Unix path syntax
+        ('storage/stream') or a list of path components
+    :param data: bytes, new contents, exactly as long as the current stream
+    :param old_digest: digest of the current stream contents that the caller
+        expects; either a hexadecimal string, an object with a ``hexdigest()``
+        method, or raw digest bytes. The replacement is only applied if the
+        stream still has that digest. The algorithm is inferred from the
+        digest length: SHA-256 (64 hex characters), SHA-384 (96) or SHA-512
+        (128) are recommended; MD5 (32) and SHA-1 (40) are accepted for
+        callers that already have legacy digests.
+    :param digest_algorithm: optional name of the hashlib algorithm, used to
+        confirm the algorithm inferred from ``old_digest``.
+    """
+    def __init__(self, stream_name=None, data=None, old_digest=None,
+                 digest_algorithm=None, **kwargs):
+        if stream_name is None:
+            stream_name = kwargs.pop('stream', kwargs.pop('path',
+                                    kwargs.pop('name', None)))
+        if data is None:
+            data = kwargs.pop('new_data', kwargs.pop('contents', None))
+        if old_digest is None:
+            old_digest = kwargs.pop('expected_digest',
+                           kwargs.pop('digest',
+                           kwargs.pop('old_sha256', None)))
+        if digest_algorithm is None:
+            digest_algorithm = kwargs.pop('algorithm', None)
+        if kwargs:
+            raise TypeError("StreamReplacement: unexpected arguments %r"
+                            % (sorted(kwargs),))
+        if stream_name is None or data is None or old_digest is None:
+            raise TypeError("StreamReplacement requires stream_name, data and "
+                            "old_digest")
+        if not isinstance(data, bytes):
+            raise TypeError("StreamReplacement: data must be a bytes string")
+        self.stream_name = stream_name
+        self.stream_path = _normalize_stream_path(stream_name)
+        self.data = data
+        self.old_digest = _digest_hex(old_digest)
+        inferred = _digest_algorithm(self.old_digest)
+        if digest_algorithm is not None:
+            if not isinstance(digest_algorithm, basestring):
+                raise TypeError("StreamReplacement: digest_algorithm must be a string")
+            if digest_algorithm.lower() != inferred:
+                raise ValueError("StreamReplacement: digest_algorithm does not "
+                                 "match old_digest length")
+            inferred = digest_algorithm.lower()
+        self.digest_algorithm = inferred
+        #: SHA-256 digest of data, used in the result receipt and in the
+        #: logical fingerprint of the output
+        self.new_digest = hashlib.sha256(data).hexdigest()
+
+    @property
+    def expected_digest(self):
+        """Alias for :attr:`old_digest`."""
+        return self.old_digest
+
+    @property
+    def new_contents(self):
+        """Alias for :attr:`data`."""
+        return self.data
+
+    @property
+    def size(self):
+        """Length of the replacement data in bytes."""
+        return len(self.data)
+
+    def __repr__(self):
+        return 'StreamReplacement(%r, size=%d, old_digest=%r)' % (
+            '/'.join(self.stream_path), self.size, self.old_digest)
+
+
+class StreamReplacementResult(object):
+    """
+    Receipt returned by :meth:`OleFileIO.replace_streams` once a group has been
+    published (or recognized as already published).
+
+    The version identifier (``group_digest``) is stable for one replacement
+    group and does not depend on the output path or on the current state of
+    the source file: a caller that lost its receipt can resubmit the same
+    stream names, old digests and new contents and recognize that the
+    published file is the same version.
+
+    Attributes:
+
+        - output_path: path of the newly published file
+        - source_digest: SHA-256 of the original OLE file this call read
+        - group_digest: SHA-256 identifying the replacement group (version)
+        - output_digest: SHA-256 of the published file
+        - status: REPLACEMENT_APPLIED or REPLACEMENT_ALREADY_APPLIED
+        - applied: True if this call created the published file
+        - already_applied: True if an identical group was already published
+        - replaced: tuple of (stream_path, old_digest, new_digest, size) tuples
+    """
+    def __init__(self, output_path, source_digest, group_digest, output_digest,
+                 status, replaced):
+        self.output_path = output_path
+        self.source_digest = source_digest
+        self.group_digest = group_digest
+        self.output_digest = output_digest
+        self.status = status
+        self.replaced = tuple(replaced)
+        #: True if this call created the published file
+        self.applied = status == REPLACEMENT_APPLIED
+        #: True if an identical group had already been published
+        self.already_applied = status == REPLACEMENT_ALREADY_APPLIED
+
+    def __eq__(self, other):
+        if isinstance(other, StreamReplacementResult):
+            return self.as_dict() == other.as_dict()
+        return NotImplemented
+
+    def __ne__(self, other):
+        result = self.__eq__(other)
+        if result is NotImplemented:
+            return result
+        return not result
+
+    @property
+    def replayed(self):
+        """Alias for :attr:`already_applied`."""
+        return self.already_applied
+
+    @property
+    def digest(self):
+        """Alias for :attr:`output_digest`."""
+        return self.output_digest
+
+    @property
+    def version(self):
+        """Alias for :attr:`group_digest`, the identity of this version."""
+        return self.group_digest
+
+    def as_dict(self):
+        """Return the receipt as a plain dictionary."""
+        return {
+            'output_path': self.output_path,
+            'source_digest': self.source_digest,
+            'group_digest': self.group_digest,
+            'version': self.group_digest,
+            'output_digest': self.output_digest,
+            'status': self.status,
+            'applied': self.applied,
+            'already_applied': self.already_applied,
+            'replaced': self.replaced,
+        }
+
+    def __getitem__(self, key):
+        return self.as_dict()[key]
+
+    def keys(self):
+        return self.as_dict().keys()
+
+    def items(self):
+        return self.as_dict().items()
+
+    def __repr__(self):
+        return 'StreamReplacementResult(%r, status=%r, group_digest=%r)' % (
+            self.output_path, self.status, self.group_digest)
+
+
+#: digest lengths supported for old-content preconditions, by hexadecimal size.
+#: SHA-256 and stronger are recommended; MD5/SHA-1 are accepted for callers
+#: that already store legacy digests.
+_DIGEST_ALGORITHMS_BY_LENGTH = {32: 'md5', 40: 'sha1', 64: 'sha256',
+                                96: 'sha384', 128: 'sha512'}
+
+
+def _digest_hex(digest):
+    """
+    Normalize a caller-provided digest to a lowercase hexadecimal string.
+
+    Accepts a hexadecimal string, raw digest bytes, or an object with a
+    ``hexdigest()`` method (such as hashlib objects). The algorithm is
+    inferred from the digest length: md5 (32), sha1 (40), sha256 (64),
+    sha384 (96) or sha512 (128 hex characters).
+    """
+    if hasattr(digest, 'hexdigest'):
+        digest = digest.hexdigest()
+    if isinstance(digest, bytes) and not isinstance(digest, str):
+        # raw digest bytes, as returned by hashlib.digest()
+        digest = binascii.hexlify(digest).decode('ascii')
+    if not isinstance(digest, basestring):
+        raise TypeError("stream digest must be a hexadecimal string or digest object")
+    digest = digest.strip().lower()
+    if len(digest) not in _DIGEST_ALGORITHMS_BY_LENGTH:
+        raise ValueError("stream digest must be a hexadecimal digest string")
+    try:
+        int(digest, 16)
+    except ValueError:
+        raise ValueError("stream digest must be a hexadecimal string")
+    return digest
+
+
+def _digest_algorithm(digest):
+    """Return the algorithm name matching a normalized hexadecimal digest."""
+    return _DIGEST_ALGORITHMS_BY_LENGTH[len(digest)]
+
+
+def _normalize_stream_path(stream_name, path_encoding=None):
+    """
+    Convert a stream name to a tuple of text path components.
+
+    Accepts a '/'-separated string or a list/tuple of components. In Python 3,
+    bytes names are decoded with ``path_encoding`` (UTF-8 by default) to match
+    the names returned by the directory parser.
+    """
+    if isinstance(stream_name, bytes) and str is not bytes:
+        stream_name = stream_name.decode(path_encoding or 'utf-8', 'replace')
+    if isinstance(stream_name, basestring):
+        parts = stream_name.split('/')
+    else:
+        parts = list(stream_name)
+        if str is not bytes:
+            parts = [part.decode(path_encoding or 'utf-8', 'replace')
+                     if isinstance(part, bytes) else part for part in parts]
+    if not parts or any(not part for part in parts):
+        raise ValueError("invalid stream name %r" % (stream_name,))
+    return tuple(parts)
+
+
+def _stream_path_key(stream_path):
+    """Case-insensitive key for a stream path, as OLE names are case-insensitive."""
+    return tuple(part.lower() for part in stream_path)
+
+
+def stream_digest(filename=None, stream_name=None, data=None):
+    """
+    Compute a stream digest as used by :class:`StreamReplacement`
+    preconditions and the receipts returned by
+    :meth:`OleFileIO.replace_streams`.
+
+    Two calling styles are supported::
+
+        stream_digest('report.doc', 'WordDocument')   # stream contents
+        stream_digest(data=contents)                  # bytes directly
+
+    :param filename: path or file-like object of the OLE file to read from,
+        or the contents themselves when it is a bytes string and neither
+        ``stream_name`` nor ``data`` is given.
+    :param stream_name: path of the stream in the OLE file (see
+        :meth:`OleFileIO.openstream` for the syntax)
+    :param data: bytes, contents to digest directly. If provided, no file is
+        opened.
+    :returns: lowercase hexadecimal SHA-256 digest
+    """
+    if data is not None:
+        return hashlib.sha256(data).hexdigest()
+    if stream_name is None:
+        if isinstance(filename, bytes):
+            return hashlib.sha256(filename).hexdigest()
+        raise TypeError("stream_digest: stream_name is required")
+    with OleFileIO(filename) as ole:
+        stream = ole.openstream(stream_name)
+        try:
+            data = stream.read()
+        finally:
+            stream.close()
+    return hashlib.sha256(data).hexdigest()
+
+
+def _looks_like_digest(value):
+    """True if value is a strong hexadecimal digest or a digest object."""
+    if hasattr(value, 'hexdigest'):
+        return True
+    if isinstance(value, bytes) and not isinstance(value, str):
+        return len(value) in (16, 20, 32, 48, 64)
+    if isinstance(value, basestring):
+        return len(value.strip()) in (32, 40, 64, 96, 128)
+    return False
+
+
+def _coerce_replacement(item):
+    """Accept a StreamReplacement, a (name, data, old_digest) tuple, or a dict."""
+    if isinstance(item, StreamReplacement):
+        return item
+    if isinstance(item, dict):
+        name = item.get('stream_name', item.get('stream_path', item.get('name')))
+        if name is None:
+            name = item.get('stream', item.get('path'))
+        data = item.get('data', item.get('new_data', item.get('contents')))
+        old_digest = item.get('old_digest', item.get('old_sha256'))
+        if old_digest is None:
+            old_digest = item.get('expected_digest', item.get('digest'))
+        if name is None or data is None or old_digest is None:
+            raise TypeError("replacement mapping needs stream_name, data and old_digest")
+        return StreamReplacement(name, data, old_digest)
+    if isinstance(item, (tuple, list)) and len(item) == 3:
+        name, second, third = item
+        # Accept both (name, data, old_digest) and (name, old_digest, data).
+        if not isinstance(second, bytes) and isinstance(third, bytes) \
+                and _looks_like_digest(second):
+            return StreamReplacement(name, third, second)
+        return StreamReplacement(name, second, third)
+    raise TypeError("replacements must be StreamReplacement objects, "
+                    "(stream_name, data, old_digest) tuples or mappings")
+
+
+def _coerce_replacements(replacements):
+    """Normalize the group argument to a list of StreamReplacement objects."""
+    if isinstance(replacements, StreamReplacement):
+        return [replacements]
+    if isinstance(replacements, dict):
+        if any(key in replacements for key in ('data', 'new_data')):
+            # a single replacement described as a mapping
+            return [_coerce_replacement(replacements)]
+        # mapping of stream name -> replacement record / (data, old_digest)
+        result = []
+        for name, value in replacements.items():
+            if isinstance(value, StreamReplacement):
+                result.append(StreamReplacement(name, value.data, value.old_digest))
+            elif isinstance(value, dict):
+                record = dict(value)
+                record['stream_name'] = name
+                result.append(_coerce_replacement(record))
+            elif isinstance(value, (tuple, list)) and len(value) == 2:
+                result.append(StreamReplacement(name, value[0], value[1]))
+            else:
+                raise TypeError("replacement for %r must be a mapping or "
+                                "(data, old_digest) tuple" % (name,))
+        return result
+    result = []
+    for item in replacements:
+        result.append(_coerce_replacement(item))
+    return result
+
+
+def _stream_snapshot(ole):
+    """
+    Build a logical fingerprint of an OLE file: every stream path, size and
+    SHA-256 digest, plus storages, root entry name and CLSID.
+
+    Two files with the same fingerprint expose the same logical contents,
+    which is what makes an already-published file recognizable on retry.
+
+    :param ole: OleFileIO instance
+    :returns: a hashable tuple
+    """
+    streams = []
+    for path in ole.listdir(streams=True, storages=False):
+        stream_path = _normalize_stream_path(path)
+        sid = ole._find(path)
+        entry = ole.direntries[sid]
+        if entry.entry_type != STGTY_STREAM:
+            continue
+        stream = ole.openstream(path)
+        try:
+            data = stream.read()
+        finally:
+            stream.close()
+        streams.append((stream_path, entry.size,
+                        hashlib.sha256(data).hexdigest()))
+    storages = [tuple(path) for path in ole.listdir(streams=False, storages=True)]
+    root_clsid = getattr(ole.root, 'clsid', '')
+    return (tuple(sorted(streams)), tuple(sorted(storages)),
+            ole.get_rootentry_name(), root_clsid)
+
+
+def _entry_byte_regions(ole, entry):
+    """
+    Return the physical byte ranges a stream occupies in the OLE container.
+
+    Regions are computed from the actual FAT or MiniFAT sector chain, so two
+    different stream names that resolve to the same or overlapping sectors
+    are detected even if the directory looks consistent. The walk is bounded
+    by the table size and detects cycles, so a malformed chain is rejected
+    instead of looping forever.
+
+    :param ole: OleFileIO instance
+    :param entry: OleDirectoryEntry of the stream
+    :returns: list of (start, end) byte offsets
+    """
+    if entry.entry_type != STGTY_STREAM or entry.size == 0:
+        return []
+    if entry.is_minifat:
+        table = ole.minifat
+        if table is None:
+            ole.loadminifat()
+            table = ole.minifat
+        # The MiniFAT writer walks the whole chain, including any trailing
+        # sectors beyond the declared size, so they are part of the write.
+        chain = _walk_sector_chain(entry.isectStart, table, entry.size,
+                                   ole.mini_sector_size, 'MiniFAT',
+                                   stop_at_size=False)
+        if not ole.root.sect_chain:
+            ole.root.build_sect_chain(ole)
+        block_size = ole.sector_size // ole.mini_sector_size
+        regions = []
+        for mini_sect in chain:
+            base = mini_sect // block_size
+            offset = mini_sect % block_size
+            if base < 0 or base >= len(ole.root.sect_chain):
+                raise StreamReplacementError(
+                    "malformed MiniFAT: mini sector %d is outside the mini stream"
+                    % (mini_sect,))
+            start = (ole.root.sect_chain[base] + 1) * ole.sector_size \
+                + offset * ole.mini_sector_size
+            regions.append((start, start + ole.mini_sector_size))
+    else:
+        chain = _walk_sector_chain(entry.isectStart, ole.fat, entry.size,
+                                   ole.sector_size, 'FAT')
+        regions = []
+        for sect in chain:
+            if sect < 0 or sect >= ole.nb_sect:
+                raise StreamReplacementError(
+                    "malformed FAT: sector %d is outside the file" % (sect,))
+            start = (sect + 1) * ole.sector_size
+            regions.append((start, start + ole.sector_size))
+    return regions
+
+
+def _walk_sector_chain(start, table, size, sector_size, table_name,
+                       stop_at_size=True):
+    """
+    Walk a FAT/MiniFAT chain and return the sector indexes it covers.
+
+    :param start: first sector index
+    :param table: FAT or MiniFAT sequence
+    :param size: declared stream size in bytes
+    :param sector_size: size of one sector of this table
+    :param table_name: 'FAT' or 'MiniFAT', used in error messages
+    :param stop_at_size: if True, stop after the number of sectors needed for
+        ``size``; if False, walk to the end of the chain
+    :returns: list of sector indexes
+    """
+    expected = (size + sector_size - 1) // sector_size
+    chain = []
+    seen = set()
+    sect = start
+    limit = len(table) + 1
+    while sect != ENDOFCHAIN and (not stop_at_size or len(chain) < expected):
+        if sect < 0 or sect >= len(table):
+            raise StreamReplacementError(
+                "malformed %s: sector index %r is out of range"
+                % (table_name, sect))
+        if sect in seen:
+            raise StreamReplacementError(
+                "malformed %s: cycle in sector chain at sector %d"
+                % (table_name, sect))
+        seen.add(sect)
+        chain.append(sect)
+        sect = table[sect] & 0xFFFFFFFF
+        if len(chain) > limit:  # defensive; the size bound should hit first
+            raise StreamReplacementError(
+                "malformed %s: sector chain is longer than the table"
+                % (table_name,))
+    if stop_at_size and len(chain) != expected:
+        raise StreamReplacementError(
+            "malformed %s: stream chain has %d sectors, expected %d"
+            % (table_name, len(chain), expected))
+    return chain
+
+
+def _check_no_overlap(regions_by_key, path_by_key):
+    """
+    Reject a group whose streams resolve to overlapping physical regions.
+
+    :param regions_by_key: dict keyed by stream path key, values are lists of
+        (start, end) byte ranges
+    :param path_by_key: dict keyed by stream path key, values are display paths
+    """
+    spans = []
+    for key, regions in regions_by_key.items():
+        for start, end in regions:
+            spans.append((start, end, key))
+    spans.sort()
+    max_end = None
+    max_key = None
+    max_start = None
+    for start, end, key in spans:
+        if max_end is not None and max_end > start:
+            first = path_by_key[max_key]
+            second = path_by_key[key]
+            raise StreamOverlapError(first, second, message=(
+                "streams %r and %r resolve to overlapping storage regions "
+                "(bytes %d-%d and %d-%d)"
+                % ('/'.join(first), '/'.join(second), max_start, max_end, start, end)))
+        if max_end is None or end > max_end:
+            max_end, max_key, max_start = end, key, start
+
+
+def _file_digest(path):
+    """Return the SHA-256 digest of a file on disk."""
+    digest = hashlib.sha256()
+    with open(path, 'rb') as fp:
+        while True:
+            chunk = fp.read(65536)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _publish_new_file(temp_path, output_path):
+    """
+    Publish a fully written temporary file without overwriting any existing
+    file at ``output_path``. The hard link makes the final name appear
+    atomically and raises EEXIST if a concurrent writer won the race.
+    """
+    link = getattr(os, 'link', None)
+    if link is None:
+        # platform without hard links (old Python on Windows)
+        if os.path.exists(output_path):
+            raise OSError(errno.EEXIST, 'output already exists', output_path)
+        os.rename(temp_path, output_path)
+        return
+    try:
+        link(temp_path, output_path)
+    except OSError as exc:
+        unsupported = set(getattr(errno, name, None) for name in
+                          ('EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS'))
+        unsupported.discard(None)
+        if exc.errno not in unsupported:
+            raise
+        # Filesystem without hard links: fall back to a checked rename.
+        if os.path.exists(output_path):
+            raise
+        os.rename(temp_path, output_path)
+        return
+    os.unlink(temp_path)
+
+
+def _text_path(path):
+    """Convert an os.PathLike or path-like object to a plain string path."""
+    if hasattr(os, 'fspath'):
+        return os.fspath(path)
+    method = getattr(path, '__fspath__', None)
+    if method is not None:
+        return method()
+    if isinstance(path, bytes):
+        return path
+    return str(path)
+
+
+def _copy_file_permissions(temp_path, reference_path):
+    """Give a published file the same access bits as its reference file."""
+    if reference_path is None or not os.path.exists(reference_path):
+        return
+    try:
+        mode = os.stat(reference_path).st_mode & 0o7777
+        os.chmod(temp_path, mode)
+    except OSError:
+        # permissions are advisory; never fail a completed publish for this
+        pass
+
+
+def _resolve_output_alias(output_path, kwargs):
+    """Accept output/destination/path keywords as aliases for output_path."""
+    for alias in ('output', 'destination', 'dest', 'new_path', 'file_path'):
+        if alias in kwargs:
+            if output_path is not None:
+                raise TypeError("output_path and %s cannot both be given" % (alias,))
+            output_path = kwargs.pop(alias)
+    if kwargs:
+        raise TypeError("unexpected arguments: %s" % (sorted(kwargs),))
+    return output_path
+
+
+def replace_streams(filename, replacements=None, output_path=None, **kwargs):
+    """
+    Module-level wrapper for :meth:`OleFileIO.replace_streams`.
+
+    :param filename: path or file-like object of the original OLE file. It is
+        opened read-only and left unchanged.
+    :param replacements: iterable of :class:`StreamReplacement` objects
+    :param output_path: path of the new file to publish. If None, a path is
+        derived from ``filename`` by appending '.replaced' before the extension.
+    :returns: :class:`StreamReplacementResult`
+    """
+    if replacements is None:
+        replacements = kwargs.pop('replacement_group',
+                                  kwargs.pop('stream_replacements', None))
+    output_path = _resolve_output_alias(output_path, kwargs)
+    with OleFileIO(filename) as ole:
+        return ole.replace_streams(replacements, output_path)
+
+
+def write_streams(filename, replacements=None, output_path=None, **kwargs):
+    """Alias for :func:`replace_streams`."""
+    return replace_streams(filename, replacements, output_path, **kwargs)
+
 
 class OleMetadata:
     """
@@ -1121,6 +1801,11 @@ class OleFileIO:
         self.warn_if_not_closed = False
         self._we_opened_fp = False
         self._open_stack = None
+        #: path this object was opened from, when it was a path on disk
+        self._opened_path = filename \
+            if isinstance(filename, basestring) and not (
+                isinstance(filename, bytes) and len(filename) >= MINIMAL_OLEFILE_SIZE) \
+            else None
         if filename:
             # try opening, ensure fp is closed if that fails
             try:
@@ -1230,6 +1915,7 @@ class OleFileIO:
                 mode = 'rb'
             self.fp = open(filename, mode)
             self._we_opened_fp = True
+            self._opened_path = filename
             self._open_stack = traceback.extract_stack()   # remember for warning
         # obtain the filesize by using seek and tell, which should work on most
         # file-like objects:
@@ -2047,6 +2733,351 @@ class OleFileIO:
         # [PL] Last sector should be a "end of chain" marker:
         if sect != ENDOFCHAIN:
             raise IOError('incorrect last sector index in OLE stream')
+
+    def replace_streams(self, replacements=None, output_path=None, **kwargs):
+        """
+        Apply a group of equal-length stream replacements and publish the
+        result as a new file, leaving the original file untouched.
+
+        This is the batch, precondition-checked counterpart of
+        :meth:`write_stream`. Each :class:`StreamReplacement` carries the
+        digest of the stream contents the caller expects to replace, so the
+        group is only published if every precondition still holds when the
+        new file is built. The new file is written completely before it is
+        published under its final name; if anything fails, no new file
+        appears.
+
+        The original file is never modified. If ``output_path`` already holds
+        the exact expected result of this same group, the call reports
+        ``status == REPLACEMENT_ALREADY_APPLIED`` (the receipt from an earlier
+        attempt was presumably lost) instead of treating it as a conflict.
+        This still works when the original file was corrected after the
+        publish, as long as the published file is byte-for-byte the result of
+        this group. If the output holds anything else, and the group is not
+        replayable, :class:`OutputStreamConflictError` is raised.
+
+        :param replacements: iterable of :class:`StreamReplacement` objects.
+            For convenience, (stream_name, data, old_digest) tuples and
+            mappings with the same keys are accepted as well.
+        :param output_path: path of the new file to publish. Must differ from
+            the original file. If None, a path is derived from the original
+            path by inserting '.replaced' before the extension.
+        :returns: :class:`StreamReplacementResult`, the receipt for this group
+        :exception StreamPreconditionError: if a stream is missing, has a
+            different size, or its contents no longer match ``old_digest``
+        :exception StreamOverlapError: if two replacements resolve to
+            overlapping storage regions (including the same stream twice)
+        :exception OutputStreamConflictError: if ``output_path`` already exists
+            and is neither the original file nor the expected result
+        """
+        if self.fp.closed:
+            raise ValueError("replace_streams: the OLE file is closed")
+        if replacements is None:
+            replacements = kwargs.pop('replacement_group',
+                                      kwargs.pop('stream_replacements', None))
+        output_path = _resolve_output_alias(output_path, kwargs)
+        if replacements is None:
+            raise TypeError("replace_streams: replacements are required")
+        source_path = self._opened_path
+        source_bytes = self._replacement_source_bytes()
+        source_digest = hashlib.sha256(source_bytes).hexdigest()
+
+        records_by_key, old_digests = self._prepare_replacements(
+            source_bytes, replacements)
+        group_digest = self._group_digest(records_by_key)
+
+        if output_path is None:
+            if source_path is None:
+                raise ValueError("replace_streams: output_path is required when "
+                                 "the OLE file was not opened from a path")
+            root, extension = os.path.splitext(source_path)
+            output_path = root + '.replaced' + extension
+        output_path = _text_path(output_path)
+        if source_path is not None and os.path.exists(output_path):
+            try:
+                same_file = os.path.samefile(source_path, output_path)
+            except OSError:
+                same_file = os.path.abspath(source_path) == \
+                    os.path.abspath(output_path)
+            if same_file:
+                raise ValueError("replace_streams: output_path must differ from "
+                                 "the original file, which is left unchanged")
+
+        # Build the complete expected output in memory from the same snapshot
+        # the preconditions are checked against, then verify it logically
+        # before writing anything.
+        expected_output = self._build_replaced_bytes(source_bytes, records_by_key)
+        expected_output_digest = hashlib.sha256(expected_output).hexdigest()
+        expected_fingerprint = self._replaced_fingerprint(expected_output)
+
+        if os.path.exists(output_path):
+            # The published file may be the result of an earlier submission of
+            # this same group (the caller lost its receipt). That is recognized
+            # from the bytes it would have, even if the original file no longer
+            # matches the old digests, as long as the group still applies
+            # structurally.
+            if self._output_matches(output_path, expected_output_digest,
+                                    expected_fingerprint):
+                return self._replacement_result(
+                    output_path, source_digest, group_digest,
+                    expected_output_digest, REPLACEMENT_ALREADY_APPLIED,
+                    records_by_key)
+            # The output is not this group's result. If the group itself is
+            # stale, report that first, as it is the actual caller error.
+            self._check_old_digests(records_by_key, old_digests)
+            raise OutputStreamConflictError(output_path)
+
+        # No output yet: every old-content precondition must hold before the
+        # new file is built or published.
+        self._check_old_digests(records_by_key, old_digests)
+
+        output_dir = os.path.dirname(os.path.abspath(output_path))
+        temp_fd, temp_path = tempfile.mkstemp(prefix='.olefile-replace-',
+                                              suffix='.tmp', dir=output_dir)
+        try:
+            with os.fdopen(temp_fd, 'wb') as temp_fp:
+                temp_fp.write(expected_output)
+                temp_fp.flush()
+                os.fsync(temp_fp.fileno())
+            # Verify the written file before it becomes visible under its
+            # final name, both as a whole and stream by stream:
+            if _file_digest(temp_path) != expected_output_digest:
+                raise StreamReplacementError(
+                    "replace_streams: written file does not match the expected "
+                    "result, nothing was published")
+            with OleFileIO(temp_path) as written:
+                actual_fingerprint = _stream_snapshot(written)
+            if actual_fingerprint != expected_fingerprint:
+                raise StreamReplacementError(
+                    "replace_streams: written streams do not match the expected "
+                    "result, nothing was published")
+            if source_path is not None and _file_digest(source_path) != source_digest:
+                # The original changed after the snapshot: the preconditions
+                # no longer describe the file this group was built from.
+                raise StreamPreconditionError(
+                    records_by_key[sorted(records_by_key)[0]].stream_path,
+                    None, None,
+                    message="the original file changed while the replacement "
+                            "group was being prepared, nothing was published")
+            _copy_file_permissions(temp_path, source_path)
+            try:
+                _publish_new_file(temp_path, output_path)
+            except OSError:
+                if os.path.exists(output_path) and self._output_matches(
+                        output_path, expected_output_digest, expected_fingerprint):
+                    # A concurrent identical call published the same result:
+                    return self._replacement_result(
+                        output_path, source_digest, group_digest,
+                        expected_output_digest, REPLACEMENT_ALREADY_APPLIED,
+                        records_by_key)
+                raise
+            temp_path = None
+        finally:
+            if temp_path is not None:
+                try:
+                    os.unlink(temp_path)
+                except OSError:
+                    pass
+        return self._replacement_result(
+            output_path, source_digest, group_digest, expected_output_digest,
+            REPLACEMENT_APPLIED, records_by_key)
+
+    def _replacement_source_bytes(self):
+        """
+        Read the whole original OLE file as bytes, without relying on the file
+        position or mode it was opened in.
+        """
+        if self._opened_path is not None:
+            with open(self._opened_path, 'rb') as fp:
+                return fp.read()
+        position = self.fp.tell()
+        try:
+            self.fp.seek(0)
+            return self.fp.read()
+        finally:
+            self.fp.seek(position)
+
+    def _prepare_replacements(self, source, replacements):
+        """
+        Validate a replacement group against one immutable snapshot of the
+        source file.
+
+        Checks performed here, against the exact bytes that will be copied to
+        the output: records must be well formed, streams must exist, must be
+        streams, must have the same length as the new data, and no two
+        replacements may resolve to overlapping storage regions. The current
+        digest of each stream is also computed, but compared separately by
+        :meth:`_check_old_digests` so that an already-published output can be
+        recognized before raising a precondition error.
+
+        :param source: bytes of the original OLE file
+        :param replacements: iterable of StreamReplacement objects, tuples or
+            mappings (see :meth:`replace_streams`)
+        :returns: (records_by_key, old_digests) where records_by_key maps a
+            stream path key to a StreamReplacement, and old_digests maps the
+            same key to the digest of the current stream contents computed
+            with that record's algorithm
+        """
+        records = _coerce_replacements(replacements)
+        if not records:
+            raise ValueError("replace_streams: at least one replacement is required")
+        records_by_key = {}
+        path_by_key = {}
+        for record in records:
+            key = _stream_path_key(record.stream_path)
+            if key in records_by_key:
+                raise StreamOverlapError(records_by_key[key].stream_path,
+                                         record.stream_path,
+                                         message="stream %r is listed more than once "
+                                         "in the same replacement group"
+                                         % ('/'.join(record.stream_path),))
+            records_by_key[key] = record
+            path_by_key[key] = record.stream_path
+        old_digests = {}
+        with OleFileIO(source) as snapshot:
+            for key, record in records_by_key.items():
+                try:
+                    sid = snapshot._find(list(record.stream_path))
+                except IOError:
+                    raise StreamPreconditionError(record.stream_path,
+                                                  record.old_digest, None,
+                        message="stream %r does not exist in this OLE file"
+                        % ('/'.join(record.stream_path),))
+                entry = snapshot.direntries[sid]
+                if entry.entry_type != STGTY_STREAM:
+                    raise StreamPreconditionError(record.stream_path,
+                                                  record.old_digest, None,
+                        message="%r is not a stream" % ('/'.join(record.stream_path),))
+                if entry.size != record.size:
+                    raise StreamReplacementError(
+                        "stream %r is %d bytes, replacement data is %d bytes: "
+                        "only equal-length replacements are allowed"
+                        % ('/'.join(record.stream_path), entry.size, record.size))
+                stream = snapshot.openstream(list(record.stream_path))
+                try:
+                    data = stream.read()
+                finally:
+                    stream.close()
+                old_digests[key] = hashlib.new(record.digest_algorithm,
+                                               data).hexdigest()
+            # Reject groups whose streams physically share or overlap sectors,
+            # even when the directory tree looks valid:
+            regions_by_key = {}
+            for key, record in records_by_key.items():
+                sid = snapshot._find(list(record.stream_path))
+                regions = _entry_byte_regions(snapshot, snapshot.direntries[sid])
+                if regions:
+                    regions_by_key[key] = regions
+            _check_no_overlap(regions_by_key, path_by_key)
+        return records_by_key, old_digests
+
+    @staticmethod
+    def _check_old_digests(records_by_key, old_digests):
+        """
+        Verify every old-content digest, raising StreamPreconditionError for
+        the first stream whose contents no longer match.
+        """
+        for key in sorted(records_by_key):
+            record = records_by_key[key]
+            actual_digest = old_digests[key]
+            if actual_digest != record.old_digest:
+                raise StreamPreconditionError(
+                    record.stream_path, record.old_digest, actual_digest,
+                    digest_algorithm=record.digest_algorithm)
+
+    def _group_digest(self, records_by_key):
+        """
+        Compute a stable digest identifying one replacement group.
+
+        The digest covers each stream path (case-insensitively, as OLE names
+        are case-insensitive), old digest, new digest and size, sorted by
+        path. It deliberately does not cover the source file, the output path
+        or any timing information, so a caller that lost its receipt and
+        resubmits the same group gets the same version identifier.
+        """
+        digest = hashlib.sha256()
+        digest.update(b'olefile.replace_streams\x00')
+        for key in sorted(records_by_key):
+            record = records_by_key[key]
+            digest.update(b'\x00')
+            digest.update('/'.join(key).encode('utf-8', 'replace'))
+            digest.update(b'\x00')
+            digest.update(record.old_digest.encode('ascii'))
+            digest.update(b'\x00')
+            digest.update(record.new_digest.encode('ascii'))
+            digest.update(struct.pack('<Q', record.size))
+        return digest.hexdigest()
+
+    def _replaced_fingerprint(self, output_bytes):
+        """
+        Return the logical fingerprint of the expected output bytes.
+
+        :param output_bytes: bytes of the built output file
+        """
+        with OleFileIO(output_bytes) as output:
+            return _stream_snapshot(output)
+
+    @staticmethod
+    def _output_matches(output_path, expected_digest, expected_fingerprint):
+        """
+        Check whether an existing output file is exactly the expected result.
+
+        Both the byte digest and the logical stream fingerprint must match.
+        The fingerprint guards against a file that happens to have the same
+        bytes on disk but a different logical layout, and lets a retry after a
+        lost receipt identify the same published version.
+        """
+        if _file_digest(output_path) != expected_digest:
+            return False
+        try:
+            with OleFileIO(output_path) as other:
+                return _stream_snapshot(other) == expected_fingerprint
+        except (IOError, OleFileError):
+            return False
+
+    def _build_replaced_bytes(self, source_bytes, records_by_key):
+        """
+        Build the complete bytes of the output file in memory.
+
+        The snapshot bytes are copied and each replacement is written through
+        a private in-memory OleFileIO over that copy, so the original file and
+        this object are never modified.
+
+        :param source_bytes: bytes of the original OLE file
+        :param records_by_key: dict keyed by stream path key
+        :returns: bytes of the new OLE file
+        """
+        # BytesIO gives the writer its own mutable buffer over a copy of the
+        # original bytes. write_stream() writes through this buffer, never
+        # through the original file or through this object's file handle.
+        buffer = io.BytesIO(source_bytes)
+        writer = OleFileIO(buffer, write_mode=True)
+        try:
+            for key, record in records_by_key.items():
+                if record.size == 0:
+                    # Equal-length replacement by empty data is a no-op; the
+                    # writer cannot address a zero-length chain.
+                    continue
+                writer.write_stream(list(record.stream_path), record.data)
+            result = buffer.getvalue()
+        finally:
+            writer.close()
+        return result
+
+    def _replacement_result(self, output_path, source_digest, group_digest,
+                            output_digest, status, records_by_key):
+        """Build the receipt returned by replace_streams."""
+        replaced = []
+        for key in sorted(records_by_key):
+            record = records_by_key[key]
+            replaced.append((record.stream_path, record.old_digest,
+                             record.new_digest, record.size))
+        return StreamReplacementResult(output_path, source_digest, group_digest,
+                                       output_digest, status, replaced)
+
+    def write_streams(self, replacements=None, output_path=None, **kwargs):
+        """Alias for :meth:`replace_streams`."""
+        return self.replace_streams(replacements, output_path, **kwargs)
 
     def get_type(self, filename):
         """

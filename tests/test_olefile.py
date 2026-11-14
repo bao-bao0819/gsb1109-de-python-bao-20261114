@@ -7,6 +7,9 @@ import unittest
 
 import os, sys
 import io
+import hashlib
+import struct
+import tempfile
 from shutil import copy2
 
 # Insert the olefile package relative to this test dir in the sys.path
@@ -207,6 +210,329 @@ class TestOleFileIO(unittest.TestCase):
             # it should raise ValueError:
             with self.assertRaises(ValueError):
                 ole.write_sect(ole.nb_sect - 1, b"x" * size)
+
+
+class TestReplaceStreams(unittest.TestCase):
+    """Tests for the batch equal-length stream replacement API."""
+
+    def setUp(self):
+        self.ole_file = u"tests/images/test-ole-file.doc"
+        self.temp_dir = tempfile.mkdtemp()
+        self.source_bytes = self._read_file(self.ole_file)
+        self.word_digest = olefile.stream_digest(self.ole_file, 'WordDocument')
+        self.table_digest = olefile.stream_digest(self.ole_file, '1Table')
+
+    def tearDown(self):
+        for name in os.listdir(self.temp_dir):
+            os.remove(os.path.join(self.temp_dir, name))
+        os.rmdir(self.temp_dir)
+
+    def _read_file(self, path):
+        with open(path, 'rb') as fp:
+            return fp.read()
+
+    def _output(self, name='output.doc'):
+        return os.path.join(self.temp_dir, name)
+
+    def test_single_stream_replacement(self):
+        replacement = b'\xa5' * 4096
+        result = olefile.replace_streams(
+            self.ole_file,
+            [olefile.StreamReplacement('WordDocument', replacement,
+                                       self.word_digest)],
+            self._output())
+        self.assertEqual(result.status, olefile.REPLACEMENT_APPLIED)
+        self.assertTrue(result.applied)
+        self.assertFalse(result.already_applied)
+        self.assertTrue(os.path.isfile(self._output()))
+        self.assertEqual(olefile.stream_digest(self._output(), 'WordDocument'),
+                         hashlib.sha256(replacement).hexdigest())
+        # original file is untouched:
+        self.assertEqual(self._read_file(self.ole_file), self.source_bytes)
+        self.assertEqual(result.source_digest,
+                         hashlib.sha256(self.source_bytes).hexdigest())
+        self.assertTrue(os.path.exists(self.ole_file))
+
+    def test_group_replacement_keeps_other_streams(self):
+        new_word = b'W' * 4096
+        new_table = b'T' * 6438
+        result = olefile.replace_streams(
+            self.ole_file,
+            [
+                olefile.StreamReplacement('WordDocument', new_word,
+                                          self.word_digest),
+                olefile.StreamReplacement('1Table', new_table,
+                                          self.table_digest),
+            ],
+            self._output())
+        self.assertEqual(result.status, olefile.REPLACEMENT_APPLIED)
+        self.assertEqual(len(result.replaced), 2)
+        with olefile.OleFileIO(self._output()) as ole:
+            self.assertEqual(ole.openstream('WordDocument').read(), new_word)
+            self.assertEqual(ole.openstream('1Table').read(), new_table)
+            # untouched streams are identical to the original:
+            original = olefile.OleFileIO(self.ole_file)
+            try:
+                self.assertEqual(ole.openstream('\x05SummaryInformation').read(),
+                                 original.openstream('\x05SummaryInformation').read())
+            finally:
+                original.close()
+
+    def test_minifat_stream_replacement(self):
+        compobj = olefile.stream_digest(self.ole_file, '\x01CompObj')
+        replacement = b'Z' * 114
+        olefile.replace_streams(
+            self.ole_file,
+            [olefile.StreamReplacement('\x01CompObj', replacement, compobj)],
+            self._output())
+        self.assertEqual(olefile.stream_digest(self._output(), '\x01CompObj'),
+                         hashlib.sha256(replacement).hexdigest())
+
+    def test_stale_digest_rejected_before_writing(self):
+        stale = hashlib.sha256(b'not the current contents').hexdigest()
+        with self.assertRaises(olefile.StreamPreconditionError) as captured:
+            olefile.replace_streams(
+                self.ole_file,
+                [olefile.StreamReplacement('WordDocument', b'X' * 4096, stale)],
+                self._output())
+        self.assertEqual(captured.exception.expected_digest, stale)
+        self.assertEqual(captured.exception.actual_digest, self.word_digest)
+        self.assertEqual(captured.exception.stream_path, ('WordDocument',))
+        self.assertFalse(os.path.exists(self._output()))
+        self.assertEqual(self._read_file(self.ole_file), self.source_bytes)
+
+    def test_one_stale_digest_rejects_whole_group(self):
+        with self.assertRaises(olefile.StreamPreconditionError):
+            olefile.replace_streams(
+                self.ole_file,
+                [
+                    olefile.StreamReplacement('WordDocument', b'X' * 4096,
+                                              self.word_digest),
+                    olefile.StreamReplacement('1Table', b'Y' * 6438,
+                                              hashlib.sha256(b'stale').hexdigest()),
+                ],
+                self._output())
+        self.assertFalse(os.path.exists(self._output()))
+        self.assertEqual(self._read_file(self.ole_file), self.source_bytes)
+
+    def test_missing_stream_rejected(self):
+        with self.assertRaises(olefile.StreamPreconditionError):
+            olefile.replace_streams(
+                self.ole_file,
+                [olefile.StreamReplacement('NoSuchStream', b'X' * 10,
+                                           hashlib.sha256(b'').hexdigest())],
+                self._output())
+        self.assertFalse(os.path.exists(self._output()))
+
+    def test_unequal_length_rejected(self):
+        with self.assertRaises(olefile.StreamReplacementError):
+            olefile.replace_streams(
+                self.ole_file,
+                [olefile.StreamReplacement('WordDocument', b'X' * 100,
+                                           self.word_digest)],
+                self._output())
+        self.assertFalse(os.path.exists(self._output()))
+
+    def test_same_stream_twice_rejected(self):
+        with self.assertRaises(olefile.StreamOverlapError):
+            olefile.replace_streams(
+                self.ole_file,
+                [
+                    olefile.StreamReplacement('WordDocument', b'X' * 4096,
+                                              self.word_digest),
+                    olefile.StreamReplacement('worddocument', b'Y' * 4096,
+                                              self.word_digest),
+                ],
+                self._output())
+        self.assertFalse(os.path.exists(self._output()))
+
+    def test_physically_overlapping_streams_rejected(self):
+        # Point a second stream at a sector already used by 1Table. The
+        # directory parses fine, but the two names resolve to the same bytes.
+        data = bytearray(self.source_bytes)
+        with olefile.OleFileIO(self.ole_file) as ole:
+            summary_sid = ole._find('\x05SummaryInformation')
+            dir_sects = []
+            sect = ole.first_dir_sector
+            while sect != olefile.ENDOFCHAIN:
+                dir_sects.append(sect)
+                sect = ole.fat[sect]
+            entry_offset = summary_sid * 128
+            sector_index = entry_offset // ole.sector_size
+            within = entry_offset % ole.sector_size
+            pos = (dir_sects[sector_index] + 1) * ole.sector_size + within
+        struct.pack_into('<I', data, pos + 116, 9)     # isectStart
+        struct.pack_into('<I', data, pos + 120, 4096)  # sizeLow
+        patched = bytes(data)
+        patched_path = self._output('patched.doc')
+        with open(patched_path, 'wb') as fp:
+            fp.write(patched)
+        with olefile.OleFileIO(patched_path) as ole:
+            first = ole.openstream('1Table').read()
+            second = ole.openstream('\x05SummaryInformation').read()
+        with self.assertRaises(olefile.StreamOverlapError) as captured:
+            olefile.replace_streams(
+                patched_path,
+                [
+                    olefile.StreamReplacement('1Table', b'A' * 6438,
+                                              hashlib.sha256(first).hexdigest()),
+                    olefile.StreamReplacement('\x05SummaryInformation',
+                                              b'B' * 4096,
+                                              hashlib.sha256(second).hexdigest()),
+                ],
+                self._output('overlap.doc'))
+        self.assertEqual(len(captured.exception.stream_names), 2)
+        self.assertFalse(os.path.exists(self._output('overlap.doc')))
+
+    def test_replay_recognized_after_lost_receipt(self):
+        replacement = b'Q' * 4096
+        group = [olefile.StreamReplacement('WordDocument', replacement,
+                                           self.word_digest)]
+        first = olefile.replace_streams(self.ole_file, group, self._output())
+        second = olefile.replace_streams(self.ole_file, group, self._output())
+        self.assertEqual(second.status, olefile.REPLACEMENT_ALREADY_APPLIED)
+        self.assertTrue(second.already_applied)
+        self.assertFalse(second.applied)
+        self.assertEqual(first.output_digest, second.output_digest)
+        self.assertEqual(first.group_digest, second.group_digest)
+        self.assertEqual(olefile.stream_digest(self._output(), 'WordDocument'),
+                         hashlib.sha256(replacement).hexdigest())
+        self.assertEqual(self._read_file(self.ole_file), self.source_bytes)
+
+    def test_replay_after_intervening_failure(self):
+        replacement = b'Q' * 4096
+        group = [olefile.StreamReplacement('WordDocument', replacement,
+                                           self.word_digest)]
+        first = olefile.replace_streams(self.ole_file, group, self._output())
+        # A stale group must fail without disturbing the published version...
+        with self.assertRaises(olefile.StreamPreconditionError):
+            olefile.replace_streams(
+                self.ole_file,
+                [olefile.StreamReplacement('WordDocument', b'R' * 4096,
+                                           hashlib.sha256(b'stale').hexdigest())],
+                self._output())
+        # ...and the original group still recognizes its own result.
+        retry = olefile.replace_streams(self.ole_file, group, self._output())
+        self.assertEqual(retry.status, olefile.REPLACEMENT_ALREADY_APPLIED)
+        self.assertEqual(retry.output_digest, first.output_digest)
+
+    def test_replay_is_case_insensitive_for_stream_names(self):
+        group = [olefile.StreamReplacement('worddocument', b'Q' * 4096,
+                                           self.word_digest)]
+        olefile.replace_streams(self.ole_file, group, self._output())
+        retry = olefile.replace_streams(self.ole_file, group, self._output())
+        self.assertEqual(retry.status, olefile.REPLACEMENT_ALREADY_APPLIED)
+
+    def test_replay_does_not_mask_different_group(self):
+        first = olefile.replace_streams(
+            self.ole_file,
+            [olefile.StreamReplacement('WordDocument', b'Q' * 4096,
+                                       self.word_digest)],
+            self._output())
+        with self.assertRaises(olefile.OutputStreamConflictError):
+            olefile.replace_streams(
+                self.ole_file,
+                [olefile.StreamReplacement('WordDocument', b'R' * 4096,
+                                           self.word_digest)],
+                self._output())
+        self.assertEqual(olefile.stream_digest(self._output(), 'WordDocument'),
+                         hashlib.sha256(b'Q' * 4096).hexdigest())
+        self.assertEqual(first.status, olefile.REPLACEMENT_APPLIED)
+
+    def test_existing_unrelated_output_not_overwritten(self):
+        conflict_path = self._output('conflict.doc')
+        with open(conflict_path, 'wb') as fp:
+            fp.write(b'unrelated data')
+        with self.assertRaises(olefile.OutputStreamConflictError):
+            olefile.replace_streams(
+                self.ole_file,
+                [olefile.StreamReplacement('WordDocument', b'Q' * 4096,
+                                           self.word_digest)],
+                conflict_path)
+        self.assertEqual(self._read_file(conflict_path), b'unrelated data')
+
+    def test_replay_after_source_corrected(self):
+        # Publish the first group, then correct the WordDocument in place with
+        # the ordinary writer. Resubmitting the original group must still
+        # recognize the published file as its own earlier result.
+        copy_path = self._output('source-copy.doc')
+        copy2(self.ole_file, copy_path)
+        group = [olefile.StreamReplacement('WordDocument', b'Q' * 4096,
+                                           self.word_digest)]
+        published = olefile.replace_streams(copy_path, group, self._output())
+        corrected = b'C' * 4096
+        with olefile.OleFileIO(copy_path, write_mode=True) as ole:
+            ole.write_stream('WordDocument', corrected)
+        new_digest = hashlib.sha256(corrected).hexdigest()
+        retry_group = [olefile.StreamReplacement('WordDocument', b'Q' * 4096,
+                                                 self.word_digest)]
+        retry = olefile.replace_streams(copy_path, retry_group, self._output())
+        self.assertEqual(retry.status, olefile.REPLACEMENT_ALREADY_APPLIED)
+        self.assertEqual(retry.group_digest, published.group_digest)
+        self.assertEqual(retry.output_digest, published.output_digest)
+        self.assertEqual(olefile.stream_digest(self._output(), 'WordDocument'),
+                         hashlib.sha256(b'Q' * 4096).hexdigest())
+        self.assertEqual(new_digest, olefile.stream_digest(copy_path,
+                                                           'WordDocument'))
+
+    def test_output_same_as_source_rejected(self):
+        with self.assertRaises(ValueError):
+            olefile.replace_streams(
+                self.ole_file,
+                [olefile.StreamReplacement('WordDocument', b'Q' * 4096,
+                                           self.word_digest)],
+                self.ole_file)
+        self.assertEqual(self._read_file(self.ole_file), self.source_bytes)
+
+    def test_no_temp_files_left_after_failure(self):
+        with self.assertRaises(olefile.StreamPreconditionError):
+            olefile.replace_streams(
+                self.ole_file,
+                [olefile.StreamReplacement('WordDocument', b'Q' * 4096,
+                                           hashlib.sha256(b'stale').hexdigest())],
+                self._output())
+        self.assertEqual(os.listdir(self.temp_dir), [])
+
+    def test_no_temp_files_left_behind(self):
+        olefile.replace_streams(
+            self.ole_file,
+            [olefile.StreamReplacement('WordDocument', b'Q' * 4096,
+                                       self.word_digest)],
+            self._output())
+        leftovers = [name for name in os.listdir(self.temp_dir)
+                     if name.startswith('.olefile-replace-')]
+        self.assertEqual(leftovers, [])
+
+    def test_old_digest_accepts_digest_object(self):
+        with open(self.ole_file, 'rb') as fp:
+            data = fp.read()
+        digest_object = hashlib.sha512(
+            olefile.OleFileIO(io.BytesIO(data)).openstream('WordDocument').read())
+        result = olefile.replace_streams(
+            self.ole_file,
+            [olefile.StreamReplacement('WordDocument', b'Q' * 4096,
+                                       digest_object)],
+            self._output())
+        self.assertEqual(result.status, olefile.REPLACEMENT_APPLIED)
+
+    def test_imported_records_accepted(self):
+        result = olefile.replace_streams(
+            self.ole_file,
+            {'WordDocument': (b'Q' * 4096, self.word_digest)},
+            self._output())
+        self.assertEqual(result.status, olefile.REPLACEMENT_APPLIED)
+
+    def test_in_memory_source_requires_output_path(self):
+        with olefile.OleFileIO(io.BytesIO(self.source_bytes)) as ole:
+            with self.assertRaises(ValueError):
+                ole.replace_streams(
+                    [olefile.StreamReplacement('WordDocument', b'Q' * 4096,
+                                               self.word_digest)])
+            result = ole.replace_streams(
+                [olefile.StreamReplacement('WordDocument', b'Q' * 4096,
+                                           self.word_digest)],
+                self._output())
+        self.assertEqual(result.status, olefile.REPLACEMENT_APPLIED)
 
 
 class FileHandleCloseTest(unittest.TestCase):

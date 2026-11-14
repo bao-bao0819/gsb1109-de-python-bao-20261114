@@ -344,6 +344,53 @@ For example, you may change text in a MS Word document:
 
 (new in v0.40)
 
+Batch replacement with old-content checks
+-----------------------------------------
+
+The :py:meth:`olefile.OleFileIO.replace_streams` method (also available as the
+module-level helper :py:func:`olefile.replace_streams`) applies a group of
+equal-length replacements to several streams at once and publishes the result
+as a new file, leaving the original file untouched.
+
+Each replacement carries the digest of the old stream contents the caller
+expects. The whole group is rejected unless every precondition still holds:
+
+* every stream exists, is a stream, and has the same length as the new data;
+* every old-content digest matches the current stream;
+* no two replacements resolve to overlapping storage regions. This is checked
+  on the real FAT/MiniFAT sector chains, so two different stream names that
+  share sectors are rejected even when the directory tree looks valid.
+
+Nothing is written unless all checks pass. The new file is built in a
+temporary file, verified stream by stream, and only then published under its
+final name, without overwriting any existing different file. The original
+file is opened read-only and is never modified.
+
+::
+
+    import olefile
+
+    # digest of the contents the caller expects to replace:
+    old = olefile.stream_digest('report.doc', 'WordDocument')
+
+    with olefile.OleFileIO('report.doc') as ole:
+        result = ole.replace_streams(
+            [olefile.StreamReplacement('WordDocument', new_word_data, old)],
+            output_path='report-fixed.doc')
+    print(result.output_digest, result.status)
+
+If a caller loses the receipt after a successful publish and submits the same
+group again to the same output path, the call recognizes the published file as
+the result of that exact group and returns ``status ==
+olefile.REPLACEMENT_ALREADY_APPLIED`` instead of reporting a conflict. A
+different group, or an unrelated existing file, raises
+:py:class:`olefile.OutputStreamConflictError`.
+
+Digests may be SHA-256, SHA-384 or SHA-512 (recommended); MD5 and SHA-1 are
+also accepted for legacy callers. The algorithm is inferred from the digest
+length. See :py:class:`olefile.StreamReplacement` and
+:py:class:`olefile.StreamReplacementResult` for details.
+
 Extract metadata
 ----------------
 
