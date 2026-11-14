@@ -98,7 +98,8 @@ __all__ = ['isOleFile', 'OleFileIO', 'OleMetadata', 'enable_logging',
            'DEFECT_FATAL', 'DEFAULT_PATH_ENCODING',
            'MAXREGSECT', 'DIFSECT', 'FATSECT', 'ENDOFCHAIN', 'FREESECT',
            'MAXREGSID', 'NOSTREAM', 'UNKNOWN_SIZE', 'WORD_CLSID',
-           'OleFileIONotClosed'
+           'OleFileIONotClosed', 'PropertyRecoveryResult',
+           'PropertyRecoveryError', 'PropertyAmbiguity'
 ]
 
 import io
@@ -556,6 +557,437 @@ class OleMetadata:
         for prop in self.DOCSUM_ATTRIBS:
             value = getattr(self, prop)
             print('- {}: {}'.format(prop, repr(value)))
+
+class PropertyRecoveryError(object):
+    """
+    Description of one property that could not be recovered safely.
+
+    The same information is available as attributes and as mapping items,
+    for example ``error.property_id`` and ``error['property_id']``.
+
+    Attributes:
+        property_id: id from the property table, or None for stream-header errors
+        offset: declared value offset, relative to the start of the property section
+        entry_index: index of the corresponding entry in the property table
+        entry_offset: byte offset of the entry inside the property section
+        declared_end: exclusive end declared by the property value
+        available_end: exclusive end of the bytes actually present in the section
+        kind: short machine-readable category
+        message: human-readable explanation
+    """
+
+    def __init__(self, property_id=None, offset=None, entry_index=None,
+                 entry_offset=None, declared_end=None, available_end=None,
+                 kind='parse_error', message='', property_type=None,
+                 detail=None, section_offset=None):
+        self.property_id = property_id
+        self.offset = offset
+        self.entry_index = entry_index
+        self.entry_offset = entry_offset
+        self.declared_end = declared_end
+        self.available_end = available_end
+        self.kind = kind
+        self.message = message
+        self.property_type = property_type
+        self.detail = detail
+        self.section_offset = section_offset
+
+    # aliases used by importers
+    @property
+    def pid(self):
+        return self.property_id
+
+    @property
+    def position(self):
+        return self.offset
+
+    @property
+    def value_offset(self):
+        return self.offset
+
+    @property
+    def error_offset(self):
+        return self.offset
+
+    @property
+    def stream_offset(self):
+        """Offset from the beginning of the property stream, when known."""
+        if self.offset is None or self.section_offset is None:
+            return None
+        return self.section_offset + self.offset
+
+    @property
+    def absolute_offset(self):
+        return self.stream_offset
+
+    @property
+    def failure_offset(self):
+        """Byte position where the value could no longer be verified."""
+        if self.declared_end is not None and self.available_end is not None:
+            return min(self.declared_end, self.available_end)
+        if self.offset is not None and self.available_end is not None:
+            return min(self.offset, self.available_end)
+        return self.offset
+
+    @property
+    def error_position(self):
+        return self.offset
+
+    @property
+    def reason(self):
+        return self.message
+
+    def as_dict(self):
+        return {
+            'property_id': self.property_id,
+            'id': self.property_id,
+            'offset': self.offset,
+            'error_position': self.offset,
+            'section_offset': self.section_offset,
+            'stream_offset': self.stream_offset,
+            'absolute_offset': self.stream_offset,
+            'failure_offset': self.failure_offset,
+            'entry_index': self.entry_index,
+            'entry_offset': self.entry_offset,
+            'declared_end': self.declared_end,
+            'available_end': self.available_end,
+            'property_type': self.property_type,
+            'kind': self.kind,
+            'message': self.message,
+            'detail': self.detail,
+        }
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return (self.property_id, self.offset, self.kind, self.message)[key]
+        return self.as_dict()[key]
+
+    def __iter__(self):
+        # allow: property_id, offset = error
+        return iter((self.property_id, self.offset))
+
+    def __contains__(self, key):
+        return key in self.as_dict()
+
+    def __eq__(self, other):
+        if isinstance(other, PropertyRecoveryError):
+            return self.as_dict() == other.as_dict()
+        if isinstance(other, tuple):
+            return (self.property_id, self.offset) == other
+        if isinstance(other, dict):
+            return self.as_dict() == other
+        return NotImplemented
+
+    def __ne__(self, other):
+        result = self.__eq__(other)
+        if result is NotImplemented:
+            return result
+        return not result
+
+    __hash__ = None
+
+    def keys(self):
+        return self.as_dict().keys()
+
+    def get(self, key, default=None):
+        return self.as_dict().get(key, default)
+
+    def items(self):
+        return self.as_dict().items()
+
+    def __repr__(self):
+        return ('PropertyRecoveryError(property_id=%r, offset=%r, kind=%r, '
+                'message=%r)' % (self.property_id, self.offset, self.kind,
+                                 self.message))
+
+
+class PropertyAmbiguity(object):
+    """
+    Two or more property entries claim the same starting offset, so the same
+    bytes are attributed to more than one id.
+
+    Ambiguous entries are not returned in the recovered values, because their
+    ownership cannot be established independently.  ``values`` contains the
+    decoded candidate value for each id when decoding itself was possible.
+
+    Attributes:
+        property_ids: tuple of ids whose declared spans start at the same byte
+        offset: first byte of the shared content
+        length: length of the content claimed by every one of the entries
+        start, end: the shared byte range (end is exclusive)
+        spans: dict mapping property id to its declared (start, end) span
+        values: dict mapping property id to its decoded candidate value
+    """
+
+    def __init__(self, property_ids, start, end, spans=None, values=None):
+        self.property_ids = tuple(property_ids)
+        self.start = start
+        self.end = end
+        self.offset = start
+        self.length = max(end - start, 0)
+        self.spans = spans or {}
+        self.values = values or {}
+
+    @property
+    def ids(self):
+        return self.property_ids
+
+    @property
+    def property_ids_or_none(self):
+        return self.property_ids
+
+    @property
+    def declared_spans(self):
+        return self.spans
+
+    @property
+    def ambiguous(self):
+        return True
+
+    @property
+    def overlap_start(self):
+        return self.start
+
+    @property
+    def overlap_end(self):
+        return self.end
+
+    def as_dict(self):
+        return {
+            'property_ids': self.property_ids,
+            'offset': self.offset,
+            'start': self.start,
+            'end': self.end,
+            'length': self.length,
+            'spans': self.spans,
+            'declared_spans': self.spans,
+            'values': self.values,
+        }
+
+    def __getitem__(self, key):
+        aliases = {
+            'ids': self.property_ids,
+            'property_ids': self.property_ids,
+            'offset': self.offset,
+            'start': self.start,
+            'end': self.end,
+            'length': self.length,
+            'overlap_start': self.start,
+            'overlap_end': self.end,
+            'spans': self.spans,
+            'declared_spans': self.spans,
+            'values': self.values,
+        }
+        return aliases[key]
+
+    def __iter__(self):
+        # allow: property_ids, start = ambiguity
+        return iter((self.property_ids, self.start))
+
+    def __contains__(self, key):
+        return key in self.as_dict()
+
+    def __eq__(self, other):
+        if isinstance(other, PropertyAmbiguity):
+            return self.as_dict() == other.as_dict()
+        if isinstance(other, tuple):
+            return (self.property_ids, self.start, self.end) == other
+        if isinstance(other, dict):
+            return self.as_dict() == other
+        return NotImplemented
+
+    def __ne__(self, other):
+        result = self.__eq__(other)
+        if result is NotImplemented:
+            return result
+        return not result
+
+    __hash__ = None
+
+    def keys(self):
+        return self.as_dict().keys()
+
+    def get(self, key, default=None):
+        return self.as_dict().get(key, default)
+
+    def items(self):
+        return self.as_dict().items()
+
+    def __repr__(self):
+        return ('PropertyAmbiguity(property_ids=%r, start=%r, end=%r)'
+                % (self.property_ids, self.start, self.end))
+
+
+class _CallableDict(dict):
+    """Dictionary that can also be called, returning itself.
+
+    This keeps ``result.values`` usable both as an attribute and as the usual
+    mapping method, whichever style an importer prefers.
+    """
+
+    def __call__(self):
+        return self
+
+
+class PropertyRecoveryResult(object):
+    """
+    Result of a recovery-mode property read.
+
+    ``values`` holds only properties whose declared byte range is fully
+    present in the section and is not part of an ambiguous overlap.  Every
+    skipped property is described in ``errors``, and each overlapping group
+    is described in ``ambiguities``.
+
+    The object also provides mapping-style access to recovered values and
+    can be unpacked as ``values, errors = result`` for simple importers.
+    """
+
+    def __init__(self, values=None, errors=None, ambiguities=None):
+        if values is None:
+            values = _CallableDict()
+        elif not isinstance(values, _CallableDict):
+            values = _CallableDict(values)
+        self.values = values
+        self.errors = errors if errors is not None else []
+        self.ambiguities = ambiguities if ambiguities is not None else []
+
+    # aliases: different callers use different domain vocabulary
+    @property
+    def recovered_values(self):
+        return self.values
+
+    @property
+    def recovered(self):
+        return self.values
+
+    @property
+    def properties(self):
+        return self.values
+
+    @property
+    def data(self):
+        return self.values
+
+    @property
+    def property_errors(self):
+        return self.errors
+
+    @property
+    def error_locations(self):
+        return self.errors
+
+    @property
+    def issues(self):
+        return self.errors
+
+    @property
+    def ambiguous(self):
+        return self.ambiguities
+
+    @property
+    def conflicts(self):
+        return self.ambiguities
+
+    @property
+    def failed(self):
+        return self.errors
+
+    @property
+    def strict(self):
+        return False
+
+    @property
+    def error_map(self):
+        """Map property id to the list of errors for that property."""
+        mapping = {}
+        for error in self.errors:
+            mapping.setdefault(error.property_id, []).append(error)
+        return mapping
+
+    @property
+    def error_offsets(self):
+        """Map property id to its declared offset, for entries that failed."""
+        return dict((error.property_id, error.offset) for error in self.errors
+                    if error.offset is not None)
+
+    @property
+    def ambiguous_ids(self):
+        ids = set()
+        for ambiguity in self.ambiguities:
+            ids.update(ambiguity.property_ids)
+        return ids
+
+    @property
+    def failed_ids(self):
+        return set(error.property_id for error in self.errors
+                   if error.property_id is not None)
+
+    @property
+    def ok(self):
+        """True when every table entry was recovered without errors."""
+        return not self.errors and not self.ambiguities
+
+    def __eq__(self, other):
+        # compare like a plain dict, to keep drop-in usage simple
+        if isinstance(other, PropertyRecoveryResult):
+            return (self.values == other.values and
+                    self.errors == other.errors and
+                    self.ambiguities == other.ambiguities)
+        if isinstance(other, dict):
+            return self.values == other
+        return NotImplemented
+
+    def __ne__(self, other):
+        result = self.__eq__(other)
+        if result is NotImplemented:
+            return result
+        return not result
+
+    __hash__ = None
+
+    def values_available(self):
+        """True when no property had to be skipped."""
+        return not self.errors and not self.ambiguities
+
+    def __getitem__(self, key):
+        if isinstance(key, str):
+            return self.as_dict()[key]
+        return self.values[key]
+
+    def __contains__(self, key):
+        return key in self.values
+
+    def __len__(self):
+        return len(self.values)
+
+    def __iter__(self):
+        # allow: values, errors = ole.getproperties(..., recover=True)
+        return iter((self.values, self.errors))
+
+    def get(self, key, default=None):
+        return self.values.get(key, default)
+
+    def keys(self):
+        return self.values.keys()
+
+    def items(self):
+        return self.values.items()
+
+    def iteritems(self):
+        return iter(self.values.items())
+
+    def as_dict(self):
+        return {
+            'values': self.values,
+            'errors': self.errors,
+            'ambiguities': self.ambiguities,
+        }
+
+    def __repr__(self):
+        return ('PropertyRecoveryResult(values=%r, errors=%r, '
+                'ambiguities=%r)' % (self.values, self.errors,
+                                     self.ambiguities))
+
 
 class OleFileIONotClosed(RuntimeWarning):
     """
@@ -2149,7 +2581,9 @@ class OleFileIO:
         """
         return self.root.name
 
-    def getproperties(self, filename, convert_time=False, no_conversion=None):
+    def getproperties(self, filename, convert_time=False, no_conversion=None,
+                      recover=False, recovery=None, recovery_mode=None,
+                      strict=None, lenient=None, mode=None):
         """
         Return properties described in substream.
 
@@ -2157,9 +2591,38 @@ class OleFileIO:
         :param convert_time: bool, if True timestamps will be converted to Python datetime
         :param no_conversion: None or list of int, timestamps not to be converted
             (for example total editing time is not a real timestamp)
+        :param recover: bool, if True use recovery mode: parse every property
+            independently, return the values that can be verified and describe
+            the properties that cannot be read. See PropertyRecoveryResult.
+        :param recovery: alias for recover (recovery_mode is also accepted)
+        :param strict: if False, same as recover=True
+        :param lenient: if True, same as recover=True
+        :param mode: 'recover', 'recovery', 'lenient' or 'import' enable
+            recovery mode; 'strict' keeps the default behavior
 
-        :returns: a dictionary of values indexed by id (integer)
+        :returns: a dictionary of values indexed by id (integer). In recovery
+            mode, a PropertyRecoveryResult object is returned instead.
         """
+        # accept a few equivalent spellings used by import pipelines
+        if mode is not None:
+            if mode in ('recover', 'recovery', 'lenient', 'import'):
+                recover = True
+            elif mode in ('strict', 'normal', 'default'):
+                recover = False
+            else:
+                raise ValueError('unknown property read mode: %r' % (mode,))
+        if not recover:
+            if recovery is not None:
+                recover = recovery
+            elif recovery_mode is not None:
+                recover = recovery_mode
+            elif strict is False:
+                recover = True
+            elif lenient is True:
+                recover = True
+        if recover:
+            return self._getproperties_recover(filename, convert_time=convert_time,
+                                               no_conversion=no_conversion)
         #REFERENCE: [MS-OLEPS] https://msdn.microsoft.com/en-us/library/dd942421.aspx
         # make sure no_conversion is a list, just to simplify code below:
         if no_conversion == None:
@@ -2212,6 +2675,413 @@ class OleFileIO:
                 self._raise_defect(DEFECT_INCORRECT, msg, type(exc))
 
         return data
+
+    def getproperties_recover(self, filename, convert_time=False, no_conversion=None):
+        """
+        Read properties in recovery mode.
+
+        This is a convenience wrapper around
+        ``getproperties(..., recover=True)``.  It returns a
+        :class:`PropertyRecoveryResult` with the safely recovered values,
+        per-property errors (including the exact declared offset) and any
+        overlapping entries.
+
+        new in version 0.48
+        """
+        return self._getproperties_recover(filename, convert_time=convert_time,
+                                           no_conversion=no_conversion)
+
+    # alias kept for importers that describe the operation rather than the mode
+    recover_properties = getproperties_recover
+
+    def _getproperties_recover(self, filename, convert_time=False, no_conversion=None):
+        """
+        Independent, non-raising parser used by recovery mode.
+
+        Each property table entry is measured on its own.  A malformed entry
+        only produces an error record; it does not prevent valid entries after
+        it from being decoded.  Entries whose declared spans overlap without a
+        clear owner are reported as ambiguous and omitted from the values.
+        """
+        if no_conversion is None:
+            no_conversion = []
+        streampath = filename
+        if not isinstance(streampath, str):
+            streampath = '/'.join(streampath)
+        result = PropertyRecoveryResult()
+        s = b''
+        section_offset = None
+
+        try:
+            fp = self.openstream(filename)
+            # header: byte order, version, system id, clsid, num sections
+            fp.read(28)
+            # format id and section offset
+            fmt = fp.read(20)
+            section_offset = i32(fmt, 16)
+            fp.seek(section_offset)
+            section_size = i32(fp.read(4))
+            if section_size < 4:
+                raise ValueError('property section size is smaller than 4 bytes')
+            # s uses '****' in place of the section size field, so offsets in
+            # the property table can be used as indexes into s directly.
+            s = b"****" + fp.read(section_size - 4)
+            if len(s) < 8:
+                raise ValueError('property section is too short to contain a count')
+            num_props = i32(s, 4)
+        except BaseException as exc:
+            msg = 'Error while parsing properties header in stream {}: {}'.format(
+                repr(streampath), exc)
+            log.warning(msg)
+            result.errors.append(PropertyRecoveryError(
+                kind='header_error', message=msg,
+                available_end=len(s), section_offset=section_offset))
+            return result
+
+        available_end = len(s)
+        # clamp the table itself, but never let a bad entry stop the loop
+        table_props = min(max(num_props, 0), max((available_end - 8) // 8, 0))
+
+        measurements = []
+        for i in iterrange(table_props):
+            entry_offset = 8 + i * 8
+            try:
+                property_id = i32(s, entry_offset)
+                offset = i32(s, entry_offset + 4)
+            except BaseException as exc:
+                result.errors.append(PropertyRecoveryError(
+                    entry_index=i, entry_offset=entry_offset,
+                    kind='table_entry_error', message=str(exc),
+                    available_end=available_end,
+                    section_offset=section_offset))
+                continue
+
+            if offset < 4 or offset + 4 > available_end:
+                msg = ('property id %d offset %d (0x%X) is outside the '
+                       'property section' % (property_id, offset, offset))
+                log.warning(msg)
+                result.errors.append(PropertyRecoveryError(
+                    property_id=property_id, offset=offset,
+                    entry_index=i, entry_offset=entry_offset,
+                    section_offset=section_offset,
+                    kind='offset_out_of_range', message=msg,
+                    available_end=available_end))
+                continue
+
+            try:
+                property_type = i32(s, offset)
+            except BaseException as exc:
+                result.errors.append(PropertyRecoveryError(
+                    property_id=property_id, offset=offset,
+                    entry_index=i, entry_offset=entry_offset,
+                    section_offset=section_offset,
+                    kind='type_read_error', message=str(exc),
+                    available_end=available_end))
+                continue
+
+            try:
+                size, status, declared_payload_end, detail = \
+                    self._measure_property(s, offset + 4, property_type)
+            except BaseException as exc:
+                result.errors.append(PropertyRecoveryError(
+                    property_id=property_id, offset=offset,
+                    entry_index=i, entry_offset=entry_offset,
+                    section_offset=section_offset,
+                    kind='parse_error', message=str(exc),
+                    available_end=available_end))
+                continue
+
+            declared_end = declared_payload_end
+            if status is not None:
+                msg = ('property id %d at offset %d (0x%X) declares %s but '
+                       'the section ends at %d (%s)' %
+                       (property_id, offset, offset,
+                        'a value ending at %d' % declared_end
+                        if declared_end is not None else 'an incomplete value',
+                        available_end, detail))
+                log.warning(msg)
+                result.errors.append(PropertyRecoveryError(
+                    property_id=property_id, offset=offset,
+                    entry_index=i, entry_offset=entry_offset,
+                    section_offset=section_offset,
+                    declared_end=declared_end, available_end=available_end,
+                    property_type=property_type,
+                    kind='value_truncated' if status == 'truncated'
+                         else 'length_truncated',
+                    message=msg, detail=detail))
+                continue
+
+            # decode only after the declared boundary has been verified
+            value = None
+            parse_error = None
+            try:
+                value = self._parse_property(s, offset + 4, property_id,
+                                             property_type, convert_time,
+                                             no_conversion)
+            except BaseException as exc:
+                parse_error = exc
+                msg = ('Error while parsing property id %d at offset %d '
+                       '(0x%X) in stream %s: %s' %
+                       (property_id, offset, offset, repr(streampath), exc))
+                log.warning(msg)
+                result.errors.append(PropertyRecoveryError(
+                    property_id=property_id, offset=offset,
+                    entry_index=i, entry_offset=entry_offset,
+                    section_offset=section_offset,
+                    declared_end=declared_end, available_end=available_end,
+                    kind='parse_error', message=msg))
+
+            measurements.append({
+                'property_id': property_id,
+                'offset': offset,
+                'entry_index': i,
+                'entry_offset': entry_offset,
+                'start': offset,
+                'end': declared_end,
+                'payload_size': size,
+                'property_type': property_type,
+                'variable': self._is_variable_length_type(property_type),
+                'value': value,
+                'usable': parse_error is None,
+            })
+
+        # Detect entries claiming the same content.  Two distinct entries
+        # starting at the same value offset cannot be told apart, so both are
+        # reported as ambiguous and kept out of the recovered values.
+        by_start = {}
+        for m in measurements:
+            by_start.setdefault(m['start'], []).append(m)
+
+        ambiguous_ids = set()
+        overrun_ids = set()
+
+        def mark_ambiguous(members, start, end):
+            ids = tuple(m['property_id'] for m in members)
+            span_map = dict((m['property_id'], (m['start'], m['end']))
+                            for m in members)
+            values = dict((m['property_id'], m['value']) for m in members
+                          if m['usable'])
+            result.ambiguities.append(
+                PropertyAmbiguity(ids, start, end, span_map, values))
+            ambiguous_ids.update(ids)
+            msg = ('property id(s) %s claim the same bytes %d..%d in %s' %
+                   (', '.join(str(p) for p in ids), start, end,
+                    repr(streampath)))
+            log.warning(msg)
+            # Each ambiguous entry is also an entry that was not recovered,
+            # so importers that only look at ``errors`` still see its position.
+            for m in members:
+                result.errors.append(PropertyRecoveryError(
+                    property_id=m['property_id'], offset=m['start'],
+                    entry_index=m['entry_index'],
+                    entry_offset=m['entry_offset'],
+                    section_offset=section_offset,
+                    declared_end=m['end'], available_end=available_end,
+                    property_type=m['property_type'],
+                    kind='ambiguous', message=msg))
+
+        for start, members in by_start.items():
+            if len(members) > 1:
+                mark_ambiguous(members, start,
+                               max(m['end'] for m in members))
+
+        # A variable-length value whose declared length reaches into the start
+        # of another entry has an over-large length.  Report only that entry;
+        # the later entry keeps its complete, independently verifiable value.
+        for m in measurements:
+            if m['property_id'] in ambiguous_ids or m['payload_size'] <= 0:
+                continue
+            if not m['variable']:
+                continue
+            crossed = [o for o in measurements
+                       if m['start'] < o['start'] < m['end']]
+            if not crossed:
+                continue
+            msg = ('property id %d at offset %d (0x%X) declares a value '
+                   'ending at %d (0x%X), across the offset %d (0x%X) of '
+                   'property id %d in %s' %
+                   (m['property_id'], m['start'], m['start'],
+                    m['end'], m['end'], crossed[0]['start'],
+                    crossed[0]['start'], crossed[0]['property_id'],
+                    repr(streampath)))
+            log.warning(msg)
+            result.errors.append(PropertyRecoveryError(
+                property_id=m['property_id'], offset=m['start'],
+                entry_index=m['entry_index'],
+                entry_offset=m['entry_offset'],
+                section_offset=section_offset,
+                declared_end=m['end'], available_end=available_end,
+                property_type=m['property_type'],
+                kind='length_overrun', message=msg))
+            overrun_ids.add(m['property_id'])
+
+        # Remaining overlaps are ownership conflicts rather than a damaged
+        # length.  Two complete values that share bytes cannot both be trusted,
+        # so they are reported as ambiguous and withheld.  Entries that merely
+        # contain the start of an over-large neighbour keep their own value.
+        for m in measurements:
+            if m['property_id'] in ambiguous_ids:
+                continue
+            if m['property_id'] in overrun_ids:
+                continue
+            if m['payload_size'] <= 0 or not m['usable']:
+                continue
+            for other in measurements:
+                if other['property_id'] == m['property_id']:
+                    continue
+                if other['property_id'] in ambiguous_ids:
+                    continue
+                if other['start'] <= m['start']:
+                    continue
+                if not (m['start'] < other['start'] < m['end']):
+                    continue
+                if other['property_id'] in overrun_ids:
+                    continue
+                if m['property_id'] in overrun_ids:
+                    continue
+                mark_ambiguous([m, other], m['start'], max(m['end'], other['end']))
+                break
+
+        # Publish recovered values, skipping only unverifiable or ambiguous
+        # entries.  Entries merely crossed by an over-large neighbour remain
+        # available.
+        for m in measurements:
+            if m['property_id'] in ambiguous_ids:
+                continue
+            if m['property_id'] in overrun_ids:
+                continue
+            if not m['usable']:
+                continue
+            # A later duplicate id would silently replace an earlier value;
+            # keep the first and report the clash instead.
+            if m['property_id'] in result.values:
+                msg = ('property id %d appears more than once in stream %s' %
+                       (m['property_id'], repr(streampath)))
+                log.warning(msg)
+                result.errors.append(PropertyRecoveryError(
+                    property_id=m['property_id'], offset=m['start'],
+                    entry_index=m['entry_index'],
+                    entry_offset=m['entry_offset'],
+                    section_offset=section_offset,
+                    declared_end=m['end'], available_end=available_end,
+                    property_type=m['property_type'],
+                    kind='duplicate_property_id', message=msg))
+                continue
+            result.values[m['property_id']] = m['value']
+
+        return result
+
+    def _is_variable_length_type(self, property_type):
+        """
+        Return True for types whose payload size comes from an explicit count.
+        """
+        base = property_type & ~VT_VECTOR
+        return (property_type & VT_VECTOR or
+                base in (VT_BSTR, VT_LPSTR, VT_LPWSTR, VT_BLOB, VT_CF))
+
+    def _measure_property_basic(self, s, offset, property_type):
+        """
+        Return (payload_size, status, declared_end, detail) for a basic type.
+
+        ``offset`` points to the value payload, just after the 4-byte type.
+        status is None when the complete declared value fits in ``s``,
+        'truncated' when a declared payload crosses the section end, and
+        'length_truncated' when the length/count field itself is missing.
+        """
+        available_end = len(s)
+
+        def fixed(size):
+            end = offset + size
+            if end > available_end:
+                return size, 'truncated', end, 'fixed-size value truncated'
+            return size, None, end, None
+
+        if property_type in (VT_I2, VT_UI2, VT_BOOL):
+            return fixed(2)
+        elif property_type in (VT_I4, VT_INT, VT_ERROR, VT_UI4, VT_UINT):
+            return fixed(4)
+        elif property_type in (VT_BSTR, VT_LPSTR, VT_BLOB, VT_CF):
+            if offset + 4 > available_end:
+                return 0, 'length_truncated', offset + 4, 'length field truncated'
+            count = i32(s, offset)
+            size = 4 + count
+            end = offset + size
+            if end > available_end:
+                return size, 'truncated', end, 'declared length exceeds section'
+            return size, None, end, None
+        elif property_type == VT_LPWSTR:
+            # Mirrors the existing parser: count is read 4 bytes into the
+            # value and the payload occupies 4 + count*2 bytes.
+            if offset + 8 > available_end:
+                return 0, 'length_truncated', offset + 8, 'string length truncated'
+            count = i32(s, offset + 4)
+            size = 4 + count * 2
+            end = offset + size
+            if end > available_end:
+                return size, 'truncated', end, 'declared string length exceeds section'
+            return size, None, end, None
+        elif property_type == VT_FILETIME:
+            return fixed(8)
+        elif property_type == VT_UI1:
+            return fixed(1)
+        elif property_type == VT_CLSID:
+            return fixed(16)
+        else:
+            # Unknown types yield None in the normal parser, with size 0.
+            return 0, None, offset, None
+
+    def _measure_property(self, s, offset, property_type):
+        """
+        Measure a property payload, including VT_VECTOR forms.
+
+        ``offset`` points just after the 4-byte property type.  The returned
+        size covers only the payload; declared_end is an index into ``s``.
+        """
+        available_end = len(s)
+        if property_type <= VT_BLOB or property_type in (VT_CLSID, VT_CF):
+            return self._measure_property_basic(s, offset, property_type)
+
+        elif property_type == VT_VECTOR | VT_VARIANT:
+            if offset + 4 > available_end:
+                return 0, 'length_truncated', offset + 4, 'vector count truncated'
+            count = i32(s, offset)
+            if count > available_end - offset:
+                return 4, 'truncated', available_end + 1, 'vector count too large'
+            pos = offset + 4
+            total = 4
+            for _ in iterrange(count):
+                if pos + 4 > available_end:
+                    return total, 'truncated', pos + 4, 'variant type truncated'
+                item_type = i32(s, pos)
+                size, status, item_end, detail = \
+                    self._measure_property_basic(s, pos + 4, item_type)
+                if status is not None:
+                    return total + size, 'truncated', item_end, detail
+                total += 4 + size
+                pos = pos + 4 + size
+            return total, None, offset + total, None
+
+        elif property_type & VT_VECTOR:
+            if offset + 4 > available_end:
+                return 0, 'length_truncated', offset + 4, 'vector count truncated'
+            count = i32(s, offset)
+            if count > available_end - offset:
+                return 4, 'truncated', available_end + 1, 'vector count too large'
+            pos = offset + 4
+            total = 4
+            base_type = property_type & ~VT_VECTOR
+            for _ in iterrange(count):
+                size, status, item_end, detail = \
+                    self._measure_property_basic(s, pos, base_type)
+                if status is not None:
+                    return total + size, 'truncated', item_end, detail
+                total += size
+                pos += size
+            return total, None, offset + total, None
+
+        else:
+            # not implemented in the normal parser: None with size 0
+            return 0, None, offset, None
 
     def _parse_property(self, s, offset, property_id, property_type, convert_time, no_conversion):
         v = None

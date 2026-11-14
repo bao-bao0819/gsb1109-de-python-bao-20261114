@@ -400,6 +400,50 @@ of indexes can be passed as no\_conversion (new in v0.25):
 
     p = ole.getproperties('specialprops', convert_time=True, no_conversion=[10])
 
+Reading a damaged property stream
+---------------------------------
+
+Some old documents contain property streams whose variable-length values
+declare a length larger than the bytes actually present, or where two
+entries point at the same content. The normal call above keeps its strict
+behavior and reports such problems through the usual defect mechanism.
+
+For import work, pass ``recover=True`` to read every entry independently.
+The result is a :py:class:`olefile.PropertyRecoveryResult`:
+
+- ``values`` contains only the values whose declared length is complete and
+  whose bytes are not claimed by another entry;
+- ``errors`` lists each unreadable entry as a
+  :py:class:`olefile.PropertyRecoveryError` with its property id, its declared
+  offset inside the property section (``offset``; add ``section_offset`` for
+  the position in the stream), and a ``kind`` such as
+  ``offset_out_of_range``, ``value_truncated``, ``length_overrun`` or
+  ``ambiguous``;
+- ``ambiguities`` lists :py:class:`olefile.PropertyAmbiguity` objects for
+  entries that claim the same content.
+
+::
+
+    result = ole.getproperties('specialprops', recover=True)
+    for prop_id, value in result.values.items():
+        print(prop_id, value)
+    for error in result.errors:
+        print(error.property_id, error.offset, error.kind, error.message)
+
+A malformed entry only affects itself: a value with an out-of-range offset or
+an over-large declared length does not prevent later entries with complete
+boundaries from being recovered. An over-large length is reported with
+``kind='length_overrun'`` for that entry only. Two complete entries that claim
+the same starting offset, or whose complete spans overlap, are excluded from
+``values`` and reported in ``ambiguities`` instead, since the reader cannot
+tell which entry owns those bytes; their candidate values remain available in
+``ambiguity.values``.
+
+The same mode is available as ``getproperties_recover(...)`` (new in v0.48).
+Equivalent spellings accepted for importers are ``recovery=True``,
+``recovery_mode=True``, ``strict=False``, ``lenient=True`` and
+``mode='recover'``.
+
 :py:meth:`olefile.OleFileIO.get_userdefined_properties` can be used to parse streams
 containing user-defined properties.
 (new in v0.47)
