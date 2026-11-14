@@ -412,6 +412,43 @@ containing user-defined properties.
             print('\t{} {}: {}'.format(index, variable['property_name'],variable['value']))
 
 
+Infer a column schema from property types
+-----------------------------------------
+
+When documents are indexed over time, the same property can change OLE type:
+a counter that used to be an integer may later be stored as a string, and old
+files may have empty properties.  :py:mod:`olefile.schema` turns parsed
+properties into *column descriptions* that keep a stable column id and can be
+merged incrementally.  Use ``with_types=True`` to keep the OLE ``VT_*`` type
+of each value:
+
+::
+
+    from olefile.schema import Schema
+
+    january = Schema(ole.getproperties('\x05SummaryInformation',
+                                       with_types=True), name='january')
+    february = Schema(ole2.getproperties('\x05SummaryInformation',
+                                         with_types=True), name='february')
+    year = january.merge(february)
+    for description in year.describe():
+        print(description['id'], description['kind'], description['value'])
+
+Merging is commutative and associative: inferring one schema per month and
+merging them in any order yields the same columns, values and conflict samples
+as one pass over the whole year.  Column ids depend only on the property name
+and on the scalar/vector shape, so a column keeps its identity when its type is
+widened.  When an integer column later receives real text, ``kind`` becomes
+``text`` while ``original_type`` and ``original_value`` still expose the
+numeric content; numeric strings are absorbed and their original spelling is
+available in ``text_samples``.  Vector and scalar properties with the same
+name produce distinct ids (``name`` and ``name#vector``).
+
+Convenience functions :py:func:`olefile.schema.infer_schema`,
+:py:func:`olefile.schema.merge_schemas` and
+:py:func:`olefile.schema.infer_properties_schema` cover the common cases.
+
+
 Close the OLE file
 ------------------
 

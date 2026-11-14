@@ -3,6 +3,13 @@ Detailed CHANGELOG
 
 olefile.py
 ----------
+* 2026-11-14 v0.47.dev7:
+    - added olefile.schema: incremental inference of mergeable column
+      descriptions from OLE property types, with stable column ids, numeric
+      widening, numeric-text look-back, scalar/vector separation and
+      order-independent merging
+    - getproperties has a new with_types option returning TypedValue objects
+      that preserve VT_* types and vector shapes
 * 2023-11-30 v0.47.dev6:
     - fixed issue #142: isOleFile has a new data parameter to handle files in memory properly
     - fixed issue #156: write_sect now correctly detects when data is larger than the sector size

@@ -98,7 +98,17 @@ __all__ = ['isOleFile', 'OleFileIO', 'OleMetadata', 'enable_logging',
            'DEFECT_FATAL', 'DEFAULT_PATH_ENCODING',
            'MAXREGSECT', 'DIFSECT', 'FATSECT', 'ENDOFCHAIN', 'FREESECT',
            'MAXREGSID', 'NOSTREAM', 'UNKNOWN_SIZE', 'WORD_CLSID',
-           'OleFileIONotClosed'
+           'OleFileIONotClosed',
+           # property types, needed to build typed properties for schemas
+           'VT_EMPTY', 'VT_NULL', 'VT_I2', 'VT_I4', 'VT_R4', 'VT_R8',
+           'VT_CY', 'VT_DATE', 'VT_BSTR', 'VT_DISPATCH', 'VT_ERROR',
+           'VT_BOOL', 'VT_VARIANT', 'VT_UNKNOWN', 'VT_DECIMAL', 'VT_I1',
+           'VT_UI1', 'VT_UI2', 'VT_UI4', 'VT_I8', 'VT_UI8', 'VT_INT',
+           'VT_UINT', 'VT_VOID', 'VT_HRESULT', 'VT_PTR', 'VT_SAFEARRAY',
+           'VT_CARRAY', 'VT_USERDEFINED', 'VT_LPSTR', 'VT_LPWSTR',
+           'VT_FILETIME', 'VT_BLOB', 'VT_STREAM', 'VT_STORAGE',
+           'VT_STREAMED_OBJECT', 'VT_STORED_OBJECT', 'VT_BLOB_OBJECT',
+           'VT_CF', 'VT_CLSID', 'VT_VECTOR'
 ]
 
 import io
@@ -387,6 +397,19 @@ def filetime2datetime(filetime):
     # log.debug('timedelta days=%d' % (filetime//(10*1000000*3600*24)))
     return _FILETIME_null_date + datetime.timedelta(microseconds=filetime//10)
 
+
+
+def _typed_property(value, property_type):
+    """Wrap a parsed value with its OLE VT type for schema inference.
+
+    Vector values keep the ``VT_VECTOR`` flag on the wrapper. For
+    ``VT_VECTOR|VT_VARIANT`` the elements are already TypedValue objects
+    because each element carries its own type.
+    """
+    # imported lazily so olefile.py has no hard dependency on schema.py
+    from .schema import TypedValue
+    return TypedValue(value, property_type,
+                      vector=bool(property_type & VT_VECTOR))
 
 
 #=== CLASSES ==================================================================
@@ -2149,7 +2172,8 @@ class OleFileIO:
         """
         return self.root.name
 
-    def getproperties(self, filename, convert_time=False, no_conversion=None):
+    def getproperties(self, filename, convert_time=False, no_conversion=None,
+                      with_types=False):
         """
         Return properties described in substream.
 
@@ -2157,6 +2181,11 @@ class OleFileIO:
         :param convert_time: bool, if True timestamps will be converted to Python datetime
         :param no_conversion: None or list of int, timestamps not to be converted
             (for example total editing time is not a real timestamp)
+        :param with_types: bool, if True each value is returned as a
+            :class:`olefile.schema.TypedValue` carrying its OLE ``VT_*`` type
+            and vector shape. This is what :func:`olefile.schema.infer_schema`
+            consumes. Defaults to False, preserving the historical return
+            format. (new in olefile 0.48)
 
         :returns: a dictionary of values indexed by id (integer)
         """
@@ -2202,7 +2231,11 @@ class OleFileIO:
                 vt_name = VT.get(property_type, 'UNKNOWN')
                 log.debug('property id=%d: type=%d/%s offset=%X' % (property_id, property_type, vt_name, offset))
 
-                value = self._parse_property(s, offset+4, property_id, property_type, convert_time, no_conversion)
+                value = self._parse_property(s, offset+4, property_id, property_type, convert_time, no_conversion, with_types=with_types)
+                if with_types:
+                    from .schema import TypedValue
+                    if not isinstance(value, TypedValue):
+                        value = _typed_property(value, property_type)
                 data[property_id] = value
             except BaseException as exc:
                 # catch exception while parsing each property, and only raise
@@ -2213,7 +2246,7 @@ class OleFileIO:
 
         return data
 
-    def _parse_property(self, s, offset, property_id, property_type, convert_time, no_conversion):
+    def _parse_property(self, s, offset, property_id, property_type, convert_time, no_conversion, with_types=False):
         v = None
         if property_type <= VT_BLOB or property_type in (VT_CLSID, VT_CF):
             v, _ = self._parse_property_basic(s, offset, property_id, property_type, convert_time, no_conversion)
@@ -2223,8 +2256,10 @@ class OleFileIO:
             count = i32(s, offset)
             values = []
             for _ in range(count):
-                property_type = i32(s, offset + off)
-                v, sz  = self._parse_property_basic(s, offset + off + 4, property_id, property_type, convert_time, no_conversion)
+                element_type = i32(s, offset + off)
+                v, sz  = self._parse_property_basic(s, offset + off + 4, property_id, element_type, convert_time, no_conversion)
+                if with_types:
+                    v = _typed_property(v, element_type)
                 values.append(v)
                 off += sz + 4
             v = values
@@ -2349,6 +2384,30 @@ class OleFileIO:
         self.metadata = OleMetadata()
         self.metadata.parse_properties(self)
         return self.metadata
+
+    def get_schema(self, filename=None, convert_time=False,
+                   no_conversion=None, name=None):
+        """Infer a mergeable column schema from property types.
+
+        :param filename: property stream path.  If None, every standard
+            property stream (name starting with ``\\x05``) is included and
+            property ids are prefixed with the stream name.
+        :param convert_time: passed to :meth:`getproperties`
+        :param no_conversion: passed to :meth:`getproperties`
+        :param name: optional schema label
+
+        :returns: an :class:`olefile.schema.Schema`
+
+        (new in olefile 0.48)
+        """
+        from .schema import infer_properties_schema, infer_ole_schema
+        if filename is None:
+            return infer_ole_schema(self, convert_time=convert_time,
+                                    no_conversion=no_conversion)
+        return infer_properties_schema(self, filename,
+                                       convert_time=convert_time,
+                                       no_conversion=no_conversion,
+                                       name=name)
 
     def get_userdefined_properties(self, filename, convert_time=False, no_conversion=None):
         """

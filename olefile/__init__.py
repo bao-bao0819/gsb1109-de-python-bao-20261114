@@ -25,4 +25,12 @@ from .olefile import *
 # import metadata not covered by *:
 from .olefile import __version__, __author__, __date__, __all__
 
+# Property-type schema inference (kept out of __all__ so ``from olefile import
+# *`` keeps exposing the historical API).
+from . import schema
+from .schema import (Schema, ColumnSchema, Column, TypedValue, infer_schema,
+                     infer_column_schema, infer_columns, merge_schemas,
+                     merge_columns, merge, describe, infer_properties_schema,
+                     infer_ole_schema)
+
 
