@@ -309,6 +309,61 @@ Precision can be set at the package level by setting `geojson.geometry.DEFAULT_P
 After setting the DEFAULT_PRECISION, coordinates will be rounded off to that precision with `geojson.load` or `geojson.loads`. Following one of those with `geojson.dump` is a quick and easy way to scale down the precision of excessively precise, arbitrarily-sized GeoJSON data.
 
 
+Topology-safe precision reduction
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Rounding polygon coordinates one feature at a time breaks adjacency: the two
+sides of a shared boundary can round differently and leave a sliver gap or
+overlap.  :code:`geojson.topology.snap_shared_edges` processes a group of
+parcels together, so boundaries are published identically on both sides.
+
+.. code:: python
+
+  >>> import geojson
+
+  >>> left = geojson.Polygon([[(0, 0), (10, 0), (10, 10), (0, 10), (0, 0)]])
+  >>> right = geojson.Polygon([[(10, 0), (20, 0), (20, 10), (10, 10), (10, 5), (10, 0)]])
+  >>> collection = geojson.FeatureCollection([
+  ...     geojson.Feature(id="left", geometry=left),
+  ...     geojson.Feature(id="right", geometry=right),
+  ... ])
+
+  >>> snapped, report = geojson.snap_shared_edges(collection, precision=2)
+  >>> (10.0, 5.0) in snapped["features"][0]["geometry"]["coordinates"][0]
+  True
+
+The intermediate vertex held by only one side is inserted into the other side,
+so both features deliver the same shared edge.  Parcels that touch along a
+shared edge are treated as an atomic group: a boundary is never rewritten on
+only one side.
+
+If quantization collapses a narrow channel or pulls a hole onto the outer
+boundary, the whole group is held back with its original geometry preserved and
+listed in :code:`report["affected_features"]`, while unaffected groups are
+still published with quantized coordinates.
+
+.. code:: python
+
+  >>> strip = geojson.Polygon([[(0, 0), (10, 0), (10, 0.004), (0, 0.004), (0, 0)]])
+  >>> neighbour = geojson.Polygon([[(0, 0.004), (10, 0.004), (10, 5), (0, 5), (0, 0.004)]])
+  >>> collection = geojson.FeatureCollection([
+  ...     geojson.Feature(id="strip", geometry=strip),
+  ...     geojson.Feature(id="neighbour", geometry=neighbour),
+  ... ])
+
+  >>> snapped, report = geojson.snap_shared_edges(collection, precision=2)
+  >>> [(item["id"], item["reasons"]) for item in report["affected_features"]]
+  [('neighbour', ['held_with_group']), ('strip', ['closed_channel'])]
+  >>> snapped["features"][0]["geometry"] == strip
+  True
+
+The report also carries :code:`report["quantized_features"]` (parcels that were
+published with new coordinates), :code:`report["groups"]` (the atomic publish
+groups and their status), :code:`report["harmonized_edges"]` and
+:code:`report["shared_boundary_segments"]`.  Only two-dimensional positions are
+supported; a :code:`ValueError` is raised otherwise.
+
+
 Helpful utilities
 -----------------
 
