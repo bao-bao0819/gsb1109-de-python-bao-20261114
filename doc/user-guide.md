@@ -186,6 +186,43 @@ The [type references example](../examples/dwarf_type_references.py) demonstrates
 following these references through typedefs and other types, and displays both
 the stored values and the resolved DIE offsets.
 
+### Inline call sites
+
+DWARF describes each concrete expansion of an inline function with a
+`DW_TAG_inlined_subroutine` DIE.  The same abstract inline function may be
+expanded several times, including several times by one caller; all those
+expansions refer to the same `DW_AT_abstract_origin` but have their own
+`DW_AT_call_*` attributes and address ranges.
+
+`DWARFInfo.inline_call_sites()` returns an `InlineCallSiteTable` with one row
+per concrete instance.  Rows are never collapsed by name or by declaration.
+Each row fills its name and type from the abstract declaration chain while
+keeping the instance's own call site, address ranges, and enclosing inline
+caller:
+
+``` python
+dwarfinfo = elffile.get_dwarf_info()
+table = dwarfinfo.inline_call_sites()
+
+for row in table:
+    print(row.offset, row.name, row.type,
+          row.call_file_name, row.call_line,
+          [(r.begin, r.end) for r in row.ranges],
+          row.caller_offset)
+
+# The innermost instance whose actual ranges contain the address.
+# Addresses in an outer range that no inner instance covers still
+# resolve to the outer row.
+row = table.at(address)
+```
+
+The table also provides `row_at(offset)`, `by_name(name)`,
+`by_declaration(die)` and `at_in_cu(address, cu)`.  Rows expose
+`declaration`, `declaration_offset`, `low_pc`, `high_pc`, `depth`,
+`caller`, and `caller_chain`.  A declaration reference that cannot be
+resolved leaves `declaration` as `None` but keeps the row and all
+instance-owned information intact.
+
 Contrary to ELF with its structured set of sections and segments, DWARF
 information is quite ad hoc for the special needs it serves. Each DWARF
 section contains different information that has to be decoded and

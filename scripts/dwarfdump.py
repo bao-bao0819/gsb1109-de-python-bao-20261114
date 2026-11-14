@@ -537,6 +537,36 @@ class ReadElf:
         last = rangelist[-1]
         self._emitline(f"0x{last.entry_offset + last.entry_length:08x}: [DW_RLE_end_of_list ]")
 
+    def dump_inline_call_sites(self) -> None:
+        """Dump one row per concrete inlined-subroutine instance."""
+        self._emitline(".debug_inline_call_sites contents:")
+        table = self._dwarfinfo.inline_call_sites()
+        for row in table:
+            ranges = ', '.join(
+                f'[0x{r.begin:0{row.die.cu.header.address_size*2}x}, '
+                f'0x{r.end:0{row.die.cu.header.address_size*2}x})'
+                for r in row.ranges) or '-'
+            self._emitline(
+                f"0x{row.offset:08x}: DW_TAG_inlined_subroutine "
+                f"(cu + 0x{row.offset - row.cu_offset:04x})"
+            )
+            self._emitline(f"              name: {row.name_text or '-'}")
+            self._emitline(f"              type: {row.type_text or '-'}")
+            self._emitline(
+                f"              call: {row.call_file_name or '-'}:"
+                f"{row.call_line if row.call_line is not None else '-'}"
+            )
+            self._emitline(
+                f"              caller: "
+                f"{f'0x{row.caller_offset:08x}' if row.caller_offset is not None else '-'}"
+                f" (depth {row.depth})"
+            )
+            self._emitline(
+                f"              declaration: "
+                f"{f'0x{row.declaration_offset:08x}' if row.declaration_offset is not None else '-'}"
+            )
+            self._emitline(f"              ranges: {ranges}")
+
 SCRIPT_DESCRIPTION = 'Display information about the contents of ELF format files'
 VERSION_STRING = f'%(prog)s: based on pyelftools {__version__}'
 
@@ -563,6 +593,9 @@ def main(stream: IO[str] | None = None) -> None:
         argparser.add_argument(f'--debug-{section}',
             action='store_true', dest=section,
             help=(f'Display the contents of DWARF debug_{section} section.'))
+    argparser.add_argument('--debug-inline-sites',
+            action='store_true', dest='inline_sites',
+            help=('Display one row per concrete inlined-subroutine instance.'))
 
     args = argparser.parse_args()
 
@@ -586,6 +619,8 @@ def main(stream: IO[str] | None = None) -> None:
                 readelf.dump_loclists()
             if args.rnglists:
                 readelf.dump_rnglists()
+            if args.inline_sites:
+                readelf.dump_inline_call_sites()
             #if args.loc:
             #    readelf.dump_loc()
             #if args.ranges:

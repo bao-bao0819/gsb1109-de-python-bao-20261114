@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from ..construct.lib.container import ListContainer
     from .callframe import ZERO, CFIEntry
     from .die import DIE
+    from .inline import InlineCallSite, InlineCallSiteTable
     from .namelut import NameLUTEntry
 
 
@@ -470,6 +471,35 @@ class DWARFInfo:
         # Selectors are not supported, but no assert on that. TODO?
         cu_addr_base = _get_base_offset(cu, 'DW_AT_addr_base')
         return struct_parse(cu.structs.the_Dwarf_target_addr, self.debug_addr_sec.stream, cu_addr_base + addr_index*cu.header.address_size)
+
+    def inline_call_sites(self) -> InlineCallSiteTable:
+        """Get a table with one row per concrete inlined-subroutine instance.
+
+        Rows are keyed by their concrete DIE offset. Shared abstract
+        declarations therefore never collapse separate expansions.
+        """
+        from .inline import build_inline_call_site_table
+        return build_inline_call_site_table(self)
+
+    def get_inline_call_sites(self) -> InlineCallSiteTable:
+        """Alias for inline_call_sites()."""
+        return self.inline_call_sites()
+
+    def inline_call_site_table(self) -> InlineCallSiteTable:
+        """Alias for inline_call_sites()."""
+        return self.inline_call_sites()
+
+    def get_inline_call_site_table(self) -> InlineCallSiteTable:
+        """Alias for inline_call_sites()."""
+        return self.inline_call_sites()
+
+    def collect_inline_call_sites(self) -> list[InlineCallSite]:
+        """Collect all rows as a list in DIE order."""
+        return self.inline_call_sites().rows
+
+    def iter_inline_call_sites(self) -> Iterator[InlineCallSite]:
+        """Iterate over all concrete inline call-site rows in DIE order."""
+        return iter(self.inline_call_sites())
 
     #------ PRIVATE ------#
 
