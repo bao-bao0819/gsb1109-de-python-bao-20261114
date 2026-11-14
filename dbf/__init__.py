@@ -82,6 +82,11 @@ from .tables import CodePage, FieldnameList, RecordTemplate
 from .tables import Db3Table, ClpTable, FpTable, VfpTable
 from .tables import RecordVaporWare
 
+from .migrate import (
+        IntermediateField, IntermediateRecord,
+        intermediate_record, intermediate_records, restore_record,
+        )
+
 api = fake_module('api',
     'Table', 'Record', 'List', 'Index', 'Relation', 'Iter', 'Null', 'Char', 'Date', 'DateTime', 'Time',
     'Logical', 'Quantum', 'CodePage', 'create_template', 'delete', 'field_names', 'gather', 'is_deleted',
@@ -115,4 +120,6 @@ __all__ = (
         'CodePage', 'FieldnameList', 'RecordTemplate',
         'Db3Table', 'ClpTable', 'FpTable', 'VfpTable',
         'RecordVaporWare',
+        'IntermediateField', 'IntermediateRecord',
+        'intermediate_record', 'intermediate_records', 'restore_record',
         )

@@ -2,6 +2,17 @@ What's New
 ==========
 
 
+0.99.013
+--------
+
+add migration support for moving records into a database with explicit nulls
+IntermediateRecord/IntermediateField keep the null bitmap, blank dates, empty
+strings, logical unknown, and memo provenance apart; the null bitmap is always
+interpreted with the layout of the file version the record came from
+restore_record re-creates those states, including the difference between an
+empty memo and a memo pointing at a real zero-length block
+
+
 0.99.001
 --------
 

@@ -146,3 +146,47 @@ Creating/writing a DBF:
             print('--------')
 
     table.close()
+
+Migrating records while preserving distinct empty states
+---------------------------------------------------------
+
+A plain ``Record`` merges several on-disk states into one Python value: a
+blank date and a nullable date whose null bit is set both look like ``None``,
+an empty character field and an empty memo both look like ``''``, and a
+logical ``?`` looks like ``Unknown``/``None``.  When moving records into a
+database with explicit null support those states must stay distinct.
+
+``intermediate_record`` captures a record as a typed, layout-aware
+intermediate record.  Each field carries its dbf type, whether the column is
+nullable in that layout, the explicit null state (the VFP ``_NullFlags``
+bitmap), the decoded business value, and the raw bytes.  The null bitmap is
+interpreted with the layout of the file version the record came from, so a
+column that was not nullable in an older version is never read using a newer
+layout's bit positions::
+
+    import dbf
+
+    source = dbf.Table('legacy.dbf', dbf_type='vfp')
+    with source:
+        for record in source:
+            intermediate = dbf.intermediate_record(record)
+            for field in intermediate:
+                if field.is_null:
+                    ...        # explicit VFP Null, distinct from a blank value
+                else:
+                    load(field.name, field.value)
+
+``restore_record`` writes an intermediate record into another open read-write
+table, reproducing the original business values.  Explicit nulls are re-flagged
+in the target's own bitmap, blank values stay blank, and memo fields keep the
+difference between a memo with no block and one that points at a real
+zero-length block::
+
+    target = dbf.Table('new.dbf', dbf_type='vfp', overwrite=True)
+    with target:
+        dbf.restore_record(target, intermediate)
+
+If the record bytes were read from a historical table whose nullability
+differed from the record's current layout, pass that historical layout
+explicitly: ``dbf.intermediate_record(record, layout=historical_meta)``.
+Physical layouts (field names, types, lengths, and offsets) must match.

@@ -5628,6 +5628,329 @@ class TestWhatever(TestCase):
         self.vfp_table.close()
 
 
+class TestMigration(TestCase):
+    "migrating records while keeping distinct empty/null states"
+
+    spec = u'name C(10); tag C(5) NULL; note M; story M NULL; born L NULL; hired D NULL; qty N(5,0) NULL'
+    data_types = dict(C=(Char, Char), L=Logical, D=Date, M=Char)
+
+    def setUp(self):
+        self.tempdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tempdir, True)
+
+    def _open_source(self, name):
+        table = Table(
+                os.path.join(self.tempdir, name), self.spec, dbf_type='vfp',
+                default_data_types=self.data_types, overwrite=True,
+                )
+        table.open(mode=READ_WRITE)
+        # blank/unknown states, an empty memo (real zero-length block)
+        table.append(('a', None, '', '', Unknown, None, None))
+        # ordinary values
+        table.append(('b', 'x', 'memo-text', 'story-text', True, Date(2001, 1, 2), 7))
+        # explicit nulls
+        table.append(('c', Null, None, Null, Null, Null, Null))
+        # uninitialized memo (pointer zero)
+        table.append(('d', None, None, None, False, Date(2020, 3, 4), 0))
+        return table
+
+    def test_intermediate_captures_distinct_states(self):
+        "null bitmap, blank date, empty string, and logical unknown stay distinct"
+        table = self._open_source('mig_src')
+        try:
+            blank, normal, nulled, uninit = list(intermediate_records(table))
+            null_def = table._meta['_NULLFLAGS']
+            raw_bitmap = lambda record: bytes(record._data[null_def[START]:null_def[END]])
+            self.assertEqual(blank.null_bitmap, raw_bitmap(table[0]))
+            self.assertEqual(nulled.null_bitmap, b'\xff')
+            # blank logical is unknown, not null
+            self.assertFalse(blank.BORN.is_null)
+            self.assertIs(blank.BORN.value, Unknown)
+            # blank date is the empty date, not a null
+            self.assertFalse(blank.HIRED.is_null)
+            self.assertIs(blank.HIRED.value, NullDate)
+            # empty character value is not the same as a null character
+            self.assertFalse(blank.TAG.is_null)
+            self.assertEqual(blank.TAG.value, u'')
+            self.assertTrue(nulled.TAG.is_null)
+            self.assertIs(nulled.TAG.value, Null)
+            # explicit nulls on every nullable column
+            for field_name in ('TAG', 'STORY', 'BORN', 'HIRED', 'QTY'):
+                self.assertTrue(nulled[field_name].is_null, field_name)
+                self.assertIs(nulled[field_name].value, Null)
+            self.assertFalse(nulled.NAME.is_null)
+            # ordinary values decode back to business values
+            self.assertEqual(normal.NAME.value, u'b')
+            self.assertIs(normal.BORN.value, Truth)
+            self.assertEqual(normal.HIRED.value, Date(2001, 1, 2))
+            self.assertEqual(normal.QTY.value, 7)
+            self.assertEqual(normal.NOTE.value, u'memo-text')
+            # field carries its type and layout null position
+            self.assertEqual(blank.BORN.type, FieldType.LOGICAL)
+            self.assertEqual(blank.BORN.null_index, table._meta['BORN'][NUL])
+            self.assertIsNone(blank.NAME.null_index)
+            # uninitialized record stays non-null
+            self.assertFalse(uninit.BORN.is_null)
+            self.assertFalse(uninit.HIRED.is_null)
+        finally:
+            table.close()
+
+    def test_memo_empty_string_vs_zero_length_block(self):
+        "empty memo and a real zero-length memo block keep their provenance"
+        table = self._open_source('mig_memo')
+        try:
+            blank, normal, nulled, uninit = list(intermediate_records(table))
+            # writing '' allocates a real (zero-length) fpt block
+            self.assertTrue(blank.NOTE.has_memo_block)
+            self.assertNotEqual(blank.NOTE.memo_block, 0)
+            self.assertEqual(blank.NOTE.value, u'')
+            # an uninitialized memo has pointer zero and no block
+            self.assertFalse(uninit.NOTE.has_memo_block)
+            self.assertEqual(uninit.NOTE.memo_block, 0)
+            # explicit null memo is neither of the above
+            self.assertTrue(nulled.STORY.is_null)
+            self.assertFalse(nulled.STORY.has_memo_block)
+            # populated memo carries its block pointer
+            self.assertTrue(normal.NOTE.has_memo_block)
+            self.assertEqual(normal.NOTE.value, u'memo-text')
+        finally:
+            table.close()
+
+    def test_restore_round_trip_preserves_states(self):
+        "restored records reproduce the original business values and states"
+        source = self._open_source('mig_rt_src')
+        captured = list(intermediate_records(source))
+        null_def = source._meta['_NULLFLAGS']
+        source_blank_bitmap = bytes(source[0]._data[null_def[START]:null_def[END]])
+        source.close()
+
+        target = Table(
+                os.path.join(self.tempdir, 'mig_rt_dst'), self.spec, dbf_type='vfp',
+                default_data_types=self.data_types, overwrite=True,
+                )
+        target.open(mode=READ_WRITE)
+        try:
+            for intermediate in captured:
+                restore_record(target, intermediate)
+            self.assertEqual(len(target), len(captured))
+            restored = list(intermediate_records(target))
+            for original, copy in zip(captured, restored):
+                self.assertEqual(original, copy)
+                self.assertEqual(
+                        [field.value for field in original],
+                        [field.value for field in copy],
+                        )
+            # explicit null bitmap reproduced, blanks are not turned into nulls
+            self.assertEqual(bytes(target[2]._data[null_def[START]:null_def[END]]), b'\xff')
+            self.assertEqual(bytes(target[0]._data[null_def[START]:null_def[END]]), source_blank_bitmap)
+            # business values survive
+            self.assertIs(target[1].born, Truth)
+            self.assertEqual(target[1].hired, Date(2001, 1, 2))
+            self.assertEqual(target[1].qty, 7)
+            self.assertEqual(target[1].note, u'memo-text')
+            self.assertIs(target[0].born, Unknown)
+            self.assertIs(target[0].hired, NullDate)
+            self.assertIs(target[2].born, Null)
+            # memo provenance survives the round trip
+            note = target._meta['NOTE']
+            story = target._meta['STORY']
+            self.assertNotEqual(
+                    bytes(target[0]._data[note[START]:note[END]]).strip(b'\x00'), b'')
+            self.assertEqual(
+                    bytes(target[3]._data[note[START]:note[END]]), b'\x00\x00\x00\x00')
+            self.assertEqual(
+                    bytes(target[3]._data[story[START]:story[END]]), b'\x00\x00\x00\x00')
+        finally:
+            target.close()
+
+    def test_historical_layout_interprets_its_own_bitmap(self):
+        "a column that was not nullable is read with the historical layout"
+        # historical layout: BORN is not nullable, so HIRED owns null bit 0
+        historical = Table(
+                ':memory:', u'name C(10); born L; hired D NULL', dbf_type='vfp',
+                default_data_types=dict(C=Char, L=Logical, D=Date), on_disk=False,
+                )
+        historical.open(mode=READ_WRITE)
+        historical.append(('old', Unknown, Null))
+        old_record = historical[0]
+        # BORN participates in no null bit because the column is not nullable
+        self.assertFalse(historical.nullable_field('BORN'))
+        self.assertTrue(historical.nullable_field('HIRED'))
+
+        captured = intermediate_record(old_record)
+        self.assertFalse(captured.BORN.nullable)
+        self.assertIsNone(captured.BORN.null_index)
+        self.assertFalse(captured.BORN.is_null)
+        self.assertIs(captured.BORN.value, Unknown)
+        self.assertTrue(captured.HIRED.nullable)
+        self.assertTrue(captured.HIRED.is_null)
+
+        # a newer layout makes BORN nullable; it would then claim null bit 0,
+        # shifting HIRED to bit 1 -- the historical bytes must not be read
+        # with those positions
+        newer = Table(
+                ':memory:', u'name C(10); born L NULL; hired D NULL', dbf_type='vfp',
+                default_data_types=dict(C=Char, L=Logical, D=Date), on_disk=False,
+                )
+        newer.open(READ_WRITE)
+        self.assertEqual(newer._meta['BORN'][NUL], 0)
+        self.assertEqual(newer._meta['HIRED'][NUL], 1)
+        misread = intermediate_record(old_record, layout=newer._meta)
+        self.assertTrue(misread.BORN.is_null)       # what the wrong layout yields
+        self.assertFalse(captured.BORN.is_null)     # historical layout is correct
+        # explicitly passing the historical layout is equivalent
+        self.assertEqual(
+                intermediate_record(old_record, layout=historical._meta), captured)
+
+    def test_cross_layout_requires_matching_physical_fields(self):
+        record_table = Table(
+                ':memory:', u'name C(10); born L', dbf_type='vfp', on_disk=False)
+        record_table.open(READ_WRITE)
+        record_table.append(('x', True))
+        different = Table(
+                ':memory:', u'name C(8); born L', dbf_type='vfp', on_disk=False)
+        different.open(READ_WRITE)
+        self.assertRaises(
+                DbfError, intermediate_record, record_table[0], different._meta)
+
+    def test_restore_validates_target(self):
+        source = self._open_source('mig_val_src')
+        captured = list(intermediate_records(source))
+        source.close()
+
+        non_nullable = Table(
+                ':memory:',
+                u'name C(10); tag C(5); note M; story M; born L; hired D; qty N(5,0)',
+                dbf_type='vfp', on_disk=False,
+                )
+        non_nullable.open(READ_WRITE)
+        self.assertRaises(DbfError, restore_record, non_nullable, captured[2])
+
+        missing_field = Table(
+                ':memory:', u'name C(10); born L NULL', dbf_type='vfp', on_disk=False)
+        missing_field.open(READ_WRITE)
+        self.assertRaises(FieldMissingError, restore_record, missing_field, captured[0])
+
+        wrong_type = Table(
+                ':memory:',
+                u'name C(10); tag C(5) NULL; note M; story M NULL; born C(1) NULL; hired D NULL; qty N(5,0) NULL',
+                dbf_type='vfp', on_disk=False,
+                )
+        wrong_type.open(READ_WRITE)
+        self.assertRaises(DbfError, restore_record, wrong_type, captured[0])
+
+        readonly = Table(
+                os.path.join(self.tempdir, 'mig_ro'), self.spec, dbf_type='vfp',
+                default_data_types=self.data_types, overwrite=True,
+                )
+        readonly.open(READ_ONLY)
+        try:
+            self.assertRaises(DbfError, restore_record, readonly, captured[0])
+        finally:
+            readonly.close()
+
+    def test_deleted_flag_and_template_round_trip(self):
+        "deleted markers and record templates migrate too"
+        table = Table(
+                os.path.join(self.tempdir, 'mig_del'), u'name C(10); born L NULL',
+                dbf_type='vfp', default_data_types=dict(L=Logical), overwrite=True,
+                )
+        table.open(READ_WRITE)
+        table.append(('gone', Null))
+        delete(table[0])
+        template = create_template(table[0])
+        from_template = intermediate_record(template)
+        from_record = intermediate_record(table[0])
+        self.assertTrue(from_record.deleted)
+        # templates carry no delete byte, but their field states still match
+        self.assertEqual(from_template.fields, from_record.fields)
+        self.assertFalse(from_template.deleted)
+        target = Table(
+                os.path.join(self.tempdir, 'mig_del_dst'), u'name C(10); born L NULL',
+                dbf_type='vfp', default_data_types=dict(L=Logical), overwrite=True,
+                )
+        target.open(READ_WRITE)
+        new_record = restore_record(target, from_record)
+        self.assertTrue(is_deleted(new_record))
+        self.assertIs(target[0].born, Null)
+        table.close()
+        target.close()
+
+    def test_db3_non_nullable_layout(self):
+        "legacy tables without null support never report nulls"
+        table = Table(
+                os.path.join(self.tempdir, 'mig_db3'),
+                u'name C(10); paid L; orderdate D; qty N(5,0); wisdom M',
+                dbf_type='db3', overwrite=True,
+                )
+        table.open(READ_WRITE)
+        table.append(('a', Unknown, None, None, 'legacy memo'))
+        table.append(('b', True, Date(1999, 9, 9), 3, ''))
+        captured = list(intermediate_records(table))
+        self.assertIsNone(captured[0].null_bitmap)
+        for intermediate in captured:
+            for field in intermediate:
+                self.assertFalse(field.nullable, field.name)
+                self.assertIsNone(field.null_index, field.name)
+                self.assertFalse(field.is_null, field.name)
+        self.assertIn(captured[0].PAID.value, (None, Unknown))
+        self.assertEqual(captured[0].WISDOM.value, u'legacy memo')
+
+        target = Table(
+                os.path.join(self.tempdir, 'mig_db3_dst'),
+                u'name C(10); paid L; orderdate D; qty N(5,0); wisdom M',
+                dbf_type='db3', overwrite=True,
+                )
+        target.open(READ_WRITE)
+        for intermediate in captured:
+            restore_record(target, intermediate)
+        restored = list(intermediate_records(target))
+        self.assertEqual(captured, restored)
+        self.assertEqual(target[0].wisdom, u'legacy memo')
+        self.assertEqual(target[1].orderdate, Date(1999, 9, 9))
+        table.close()
+        target.close()
+
+    def test_foxpro_ascii_memo_pointer(self):
+        "FoxPro2 ten-byte ASCII memo pointers are parsed by value, not as binary"
+        table = Table(
+                os.path.join(self.tempdir, 'mig_fp'),
+                u'name C(10); wisdom M; notes M',
+                dbf_type='fp', overwrite=True,
+                )
+        table.open(READ_WRITE)
+        table.append(('a', 'fox memo', 'second memo'))
+        table.append()
+        captured = list(intermediate_records(table))
+        populated, empty = captured
+        # the pointer lives in a ten-byte ASCII field, not a four-byte binary one
+        self.assertEqual(len(populated.WISDOM.raw), 10)
+        self.assertTrue(populated.WISDOM.has_memo_block)
+        self.assertIsInstance(populated.WISDOM.memo_block, int)
+        self.assertEqual(populated.WISDOM.value, u'fox memo')
+        self.assertTrue(populated.NOTES.has_memo_block)
+        self.assertEqual(populated.NOTES.value, u'second memo')
+        # an uninitialized memo stays pointer zero
+        self.assertFalse(empty.WISDOM.has_memo_block)
+        self.assertEqual(empty.WISDOM.memo_block, 0)
+        self.assertFalse(empty.NOTES.has_memo_block)
+
+        target = Table(
+                os.path.join(self.tempdir, 'mig_fp_dst'),
+                u'name C(10); wisdom M; notes M',
+                dbf_type='fp', overwrite=True,
+                )
+        target.open(READ_WRITE)
+        for intermediate in captured:
+            restore_record(target, intermediate)
+        self.assertEqual(target[0].wisdom, u'fox memo')
+        self.assertEqual(target[0].notes, u'second memo')
+        table.close()
+        target.close()
+
+
 # main
 if __name__ == '__main__':
     tempdir = tempfile.mkdtemp()
