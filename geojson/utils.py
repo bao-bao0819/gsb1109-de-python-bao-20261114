@@ -1,5 +1,171 @@
 """Coordinate utility functions."""
 
+_COVERAGE_EPS = 1e-9
+
+
+def _normalize_longitude(lon):
+    """Normalizes a longitude to the [-180, 180) range."""
+    return ((lon + 180.0) % 360.0) - 180.0
+
+
+def _leaf_geometries(obj):
+    """Yields the leaf (non-collection) geometries of any GeoJSON object."""
+    obj_type = obj.get('type')
+    if obj_type == 'FeatureCollection':
+        for feature in obj['features']:
+            yield from _leaf_geometries(feature)
+    elif obj_type == 'Feature':
+        geometry = obj.get('geometry')
+        if geometry is not None:
+            yield from _leaf_geometries(geometry)
+    elif obj_type == 'GeometryCollection':
+        for geometry in obj['geometries']:
+            if geometry is not None:
+                yield from _leaf_geometries(geometry)
+    else:
+        yield obj
+
+
+def coverage(objects):
+    """
+    Computes the minimal longitude/latitude coverage of a batch of GeoJSON
+    objects (Features, GeometryCollections, or any other GeoJSON), and
+    reports which source coordinates touch the resulting boundary.
+
+    Longitude is treated as circular: the coverage is the shortest arc
+    containing all longitudes, which may cross the antimeridian (or zero)
+    and be shorter than a plain min/max interval. If several shortest arcs
+    are equally long, all of them are reported.
+
+    Empty geometries (null geometries, empty coordinate arrays, empty
+    collections) are kept in the source list but do not expand the
+    boundary.
+
+    :param objects: An iterable of GeoJSON objects, or a single object.
+    :type objects: iterable or Feature, GeometryCollection, ...
+    :return: A dict with the following keys:
+
+        - ``sources``: one entry per input object, ``{'index', 'type',
+          'empty'}``. Empty sources contribute no coordinates.
+        - ``longitude``: ``{'span', 'arcs'}`` where ``span`` is the
+          shortest arc length in degrees (``None`` if no coordinates) and
+          ``arcs`` lists every equally short arc as ``{'start', 'end',
+          'span', 'crosses_antimeridian', 'west', 'east'}``. ``start`` and
+          ``end`` are normalized to [-180, 180); the arc runs eastward
+          from ``start`` to ``end``. ``west``/``east`` list the source
+          coordinates sitting on the arc endpoints.
+        - ``latitude``: ``{'min', 'max', 'south', 'north'}`` with the
+          source coordinates reaching each bound.
+        - ``altitude``: ``None`` if no coordinate carries an altitude,
+          otherwise ``{'min', 'max', 'coordinate_count', 'geometries'}``
+          where ``geometries`` identifies the sub-geometries (by source
+          and geometry index) that actually carry altitude values.
+
+        Boundary coordinates are reported as ``{'source', 'geometry',
+        'coordinate'}`` references.
+    :rtype: dict
+    """
+    if isinstance(objects, dict):
+        objects = [objects]
+
+    sources = []
+    points = []  # (source_index, geometry_index, coordinate)
+    geometry_types = {}  # (source_index, geometry_index) -> geometry type
+
+    for source_index, obj in enumerate(objects):
+        before = len(points)
+        for geometry_index, geometry in enumerate(_leaf_geometries(obj)):
+            geometry_types[(source_index, geometry_index)] = geometry.get('type')
+            for coordinate in coords(geometry):
+                points.append((source_index, geometry_index, tuple(coordinate)))
+        sources.append({
+            'index': source_index,
+            'type': obj.get('type'),
+            'empty': len(points) == before,
+        })
+
+    def reference(point):
+        source_index, geometry_index, coordinate = point
+        return {
+            'source': source_index,
+            'geometry': geometry_index,
+            'coordinate': coordinate,
+        }
+
+    # Latitude is a plain interval.
+    if points:
+        lat_min = min(p[2][1] for p in points)
+        lat_max = max(p[2][1] for p in points)
+        latitude = {
+            'min': lat_min,
+            'max': lat_max,
+            'south': [reference(p) for p in points if p[2][1] == lat_min],
+            'north': [reference(p) for p in points if p[2][1] == lat_max],
+        }
+    else:
+        latitude = {'min': None, 'max': None, 'south': [], 'north': []}
+
+    # Longitude is circular: the minimal covering arc is the complement of
+    # the largest gap between consecutive longitudes on the circle.
+    arcs = []
+    span = None
+    if points:
+        circle = sorted({p[2][0] % 360.0 for p in points})
+        gaps = []
+        for i, lon in enumerate(circle):
+            nxt = circle[(i + 1) % len(circle)]
+            if i == len(circle) - 1:
+                nxt += 360.0
+            gaps.append((nxt - lon, lon, nxt))
+        max_gap = max(gap for gap, _, _ in gaps)
+        span = 360.0 - max_gap
+        for gap, gap_start, gap_end in gaps:
+            if abs(gap - max_gap) > _COVERAGE_EPS:
+                continue
+            start = _normalize_longitude(gap_end)
+            end = _normalize_longitude(gap_start)
+            arcs.append({
+                'start': start,
+                'end': end,
+                'span': span,
+                'crosses_antimeridian': start > end,
+                'west': [reference(p) for p in points
+                         if abs(_normalize_longitude(p[2][0]) - start)
+                         <= _COVERAGE_EPS],
+                'east': [reference(p) for p in points
+                         if abs(_normalize_longitude(p[2][0]) - end)
+                         <= _COVERAGE_EPS],
+            })
+
+    # Altitude statistics only cover the coordinates that actually carry
+    # an altitude value.
+    alt_points = [p for p in points if len(p[2]) > 2]
+    if alt_points:
+        altitudes = [p[2][2] for p in alt_points]
+        altitude = {
+            'min': min(altitudes),
+            'max': max(altitudes),
+            'coordinate_count': len(alt_points),
+            'geometries': [
+                {
+                    'source': source_index,
+                    'geometry': geometry_index,
+                    'type': geometry_types[(source_index, geometry_index)],
+                }
+                for source_index, geometry_index
+                in sorted({(p[0], p[1]) for p in alt_points})
+            ],
+        }
+    else:
+        altitude = None
+
+    return {
+        'sources': sources,
+        'longitude': {'span': span, 'arcs': arcs},
+        'latitude': latitude,
+        'altitude': altitude,
+    }
+
 
 def coords(obj):
     """
