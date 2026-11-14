@@ -54,6 +54,36 @@ Misc methods
 .. automethod:: SSAFile.remove_miscellaneous_events
 .. automethod:: SSAFile.equals
 .. automethod:: SSAFile.sort
+.. automethod:: SSAFile.merge_revisions
+
+Merging proofread revisions
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. autofunction:: pysubs2.merge_revisions
+
+.. autoclass:: pysubs2.revision.MergeResult
+   :members:
+
+.. autoclass:: pysubs2.revision.MergeGroup
+   :members:
+
+.. autoclass:: pysubs2.revision.EventProvenance
+   :members:
+
+.. autoclass:: pysubs2.revision.TextEdit
+   :members:
+
+.. autoclass:: pysubs2.revision.UnresolvedChange
+   :members:
+
+.. autoclass:: pysubs2.revision.MergeConflict
+   :members:
+
+.. autoclass:: pysubs2.revision.Revision
+   :members:
+
+.. autoclass:: pysubs2.revision.Placement
+   :members:
 
 
 ``SSAEvent`` --- one subtitle

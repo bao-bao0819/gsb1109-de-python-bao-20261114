@@ -1,7 +1,11 @@
+import json
 import subprocess
 import sys
 from io import StringIO
+from textwrap import dedent
 from typing import Any
+
+import pytest
 
 from pysubs2.cli import Pysubs2CLI
 
@@ -380,6 +384,89 @@ def test_srt_keep_unknown_html_tags(tmp_path: Any) -> None:
     with path.open("r", encoding="utf-8") as fp:
         out = fp.read()
         assert out.strip() == TEST_SRT_KEEP_UNKNOWN_HTML_TAGS.strip()
+
+
+def test_merge_revisions(tmp_path: Any) -> None:
+    base_srt = dedent("""\
+        1
+        00:00:00,000 --> 00:00:02,000
+        今天天气很好我们出去玩吧
+
+        2
+        00:00:03,000 --> 00:00:05,000
+        明天见
+
+        """)
+
+    base_path = tmp_path / "base.srt"
+    with base_path.open("w", encoding="utf-8") as fp:
+        fp.write(base_srt)
+
+    retimed_path = tmp_path / "retimed.srt"
+    with retimed_path.open("w", encoding="utf-8") as fp:
+        fp.write(base_srt.replace("00:00:00,000", "00:00:01,000")
+                 .replace("00:00:02,000", "00:00:03,000"))
+
+    edited_path = tmp_path / "edited.srt"
+    with edited_path.open("w", encoding="utf-8") as fp:
+        fp.write(base_srt.replace("今天天气", "今天天汽"))
+
+    split_path = tmp_path / "split.srt"
+    with split_path.open("w", encoding="utf-8") as fp:
+        fp.write(dedent("""\
+            1
+            00:00:00,000 --> 00:00:01,000
+            今天天气很好
+
+            2
+            00:00:01,000 --> 00:00:02,000
+            我们出去玩吧
+
+            3
+            00:00:03,000 --> 00:00:05,000
+            明天见
+
+            """))
+
+    output_dir = tmp_path / "merged"
+    report_path = tmp_path / "report.json"
+
+    cli = Pysubs2CLI()
+    rv = cli([
+        "--output-dir", str(output_dir),
+        "--merge", f"甲={retimed_path}",
+        "--merge", f"乙={edited_path}",
+        "--merge", f"丙={split_path}",
+        "--merge-report", str(report_path),
+        str(base_path),
+    ])
+
+    assert rv == 0
+    with (output_dir / "base.srt").open("r", encoding="utf-8") as fp:
+        output = fp.read()
+
+    assert "今天天汽很好" in output
+    assert "我们出去玩吧" in output
+    assert "00:00:01,000 --> 00:00:02,000" in output
+    assert "00:00:02,000 --> 00:00:03,000" in output
+
+    with report_path.open("r", encoding="utf-8") as fp:
+        report = json.load(fp)
+
+    assert report["authors"] == ["甲", "乙", "丙"]
+    assert report["groups"][0]["split_by"] == "丙"
+    assert "unresolved" in report
+    assert "conflicts" in report
+
+
+def test_merge_report_requires_merge(tmp_path: Any) -> None:
+    inpath = tmp_path / "test.srt"
+    with inpath.open("w", encoding="utf-8") as fp:
+        fp.write(TEST_SRT_FILE)
+
+    cli = Pysubs2CLI()
+    with pytest.raises(SystemExit):
+        cli(["--merge-report", str(tmp_path / "report.json"), str(inpath)])
 
 
 def test_print_help_on_empty_tty_input(capsys: Any, monkeypatch: Any) -> None:

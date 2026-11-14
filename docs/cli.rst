@@ -22,6 +22,46 @@ aggressive skipping, try the ``--clean`` option, which will also try to skip kar
 To handle SRT files with mixed HTML ``<tags>`` and SubStation ``{\tags}``, you can use these options:
 ``--srt-keep-html-tags --srt-keep-ssa-tags``.
 
+Merging proofread revisions
+---------------------------
+
+If several proofreaders worked on the same subtitle file, pass the original file as input and each
+complete revised copy with ``--merge AUTHOR=FILE``. The original is the common reference; unchanged
+fields are taken from it, so a timing-only revision does not revert another reviewer's text edits::
+
+    pysubs2 --merge 甲=retimed.srt --merge 乙=proofread.srt --merge 丙=split.srt \
+            --merge-report report.json original.srt
+
+Splitting one subtitle into several is supported. An edit from another reviewer is placed in the split
+event which uniquely contains it; when it could belong to more than one event, it is not guessed and
+is listed under ``unresolved`` in the JSON report. The report also contains per-original-subtitle
+provenance and any irreconcilable conflicts::
+
+    {
+      "authors": ["甲", "乙", "丙"],
+      "groups": [
+        {
+          "base_index": 0,
+          "base_span": {"start": 0, "end": 2000},
+          "base_text": "今天天气很好我们出去玩吧",
+          "split_by": "丙",
+          "authors": ["甲", "乙", "丙"],
+          "timing_authors": ["甲"],
+          "text_authors": ["乙", "丙"],
+          "events": [...],
+          "edits": [...]
+        }
+      ],
+      "unresolved": [],
+      "conflicts": []
+    }
+
+.. note::
+
+    ``--merge`` processes exactly one input file and may be combined with the usual output options,
+    such as ``--to``, ``--output-dir`` and ``--clean``. The merged subtitles are written to the normal
+    output; the JSON report is only written when ``--merge-report`` is given.
+
 .. warning::
     
     By default, the script works in-place; original files are overwritten. You can use the ``-o/--output-dir``

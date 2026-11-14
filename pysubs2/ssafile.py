@@ -2,10 +2,10 @@
 
 import io
 import logging
-from collections.abc import Iterable, Iterator, MutableSequence
+from collections.abc import Iterable, Iterator, Mapping, MutableSequence
 from itertools import chain
 from pathlib import Path
-from typing import Any, ClassVar, Literal, TextIO, Unpack, overload, override
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, TextIO, Unpack, overload, override
 
 from .common import IntOrFloat, PathOrStr
 from .formats.jsonformat import JSONFormat
@@ -21,6 +21,9 @@ from .formats.whisper import WhisperJAXFormat
 from .ssaevent import SSAEvent
 from .ssastyle import SSAStyle
 from .time import make_time, ms_to_str
+
+if TYPE_CHECKING:
+    from .revision import MergeResult, Revision
 
 logger = logging.getLogger(__name__)
 
@@ -1029,6 +1032,34 @@ class SSAFile(MutableSequence[SSAEvent]):
         for name, style in subs.styles.items():
             if name not in self.styles or overwrite:
                 self.styles[name] = style
+
+    def merge_revisions(
+            self,
+            revisions: Mapping[str, "SSAFile"] | Iterable["Revision"] | Iterable[tuple[str, "SSAFile"]],
+            *,
+            max_split_events: int = 4,
+    ) -> "MergeResult":
+        """
+        Merge proofread revisions of this file into one attributed revision.
+
+        ``self`` is used as the original reference.  Each revision is a
+        complete copy of it; changes are merged field by field against the
+        original, so a timing-only revision cannot revert another reviewer's
+        text edits.
+
+        See :func:`pysubs2.merge_revisions` for the full description.
+
+        Arguments:
+            revisions: Reviewer name to revised :class:`SSAFile` mapping.
+            max_split_events: Maximum events one original event may split into.
+
+        Returns:
+            A :class:`pysubs2.revision.MergeResult`.
+
+        """
+        from .revision import merge_revisions
+
+        return merge_revisions(self, revisions, max_split_events=max_split_events)
 
     # ------------------------------------------------------------------------
     # Helper methods

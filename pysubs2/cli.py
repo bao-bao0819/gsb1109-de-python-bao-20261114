@@ -38,6 +38,20 @@ def time(s: str) -> int:
     return make_time(**d)  # type: ignore
 
 
+def revision(s: str) -> tuple[str, Path]:
+    if "=" not in s:
+        raise argparse.ArgumentTypeError(
+            f"expected AUTHOR=FILE, got {s!r}"
+        )
+    author, path = s.split("=", 1)
+    author = author.strip()
+    if not author:
+        raise argparse.ArgumentTypeError("reviewer name must not be empty")
+    if not path:
+        raise argparse.ArgumentTypeError("revision path must not be empty")
+    return author, Path(path)
+
+
 class Pysubs2CLI:
     def __init__(self) -> None:
         parser = self.parser = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -106,6 +120,16 @@ class Pysubs2CLI:
         group.add_argument("--transform-framerate", nargs=2, metavar=("FPS1", "FPS2"), type=positive_float,
                            help="Multiply all timestamps by FPS1/FPS2 ratio.")
 
+        merge_group = parser.add_argument_group("proofreading merge")
+        merge_group.add_argument("--merge", metavar="AUTHOR=FILE", action="append", type=revision,
+                                 help="Merge a proofread revision of the input file. May be repeated, "
+                                      "once per reviewer. The input file is used as the original reference. "
+                                      "Fields unchanged by a reviewer are taken from the original, so a "
+                                      "timing-only revision cannot revert another reviewer's text edits.")
+        merge_group.add_argument("--merge-report", metavar="FILE", type=Path,
+                                 help="Write the merge report (provenance, unresolved changes, conflicts) "
+                                      "as JSON. Only valid with --merge.")
+
         extra_srt_options = parser.add_argument_group("optional arguments (SRT)")
         extra_srt_options.add_argument("--srt-keep-unknown-html-tags", action="store_true",
                                        help="(input) do not strip unrecognized HTML tags")
@@ -138,6 +162,15 @@ class Pysubs2CLI:
         if output_dir is not None and not output_dir.exists():
             output_dir.mkdir(parents=True)
 
+        if args.merge_report is not None and not args.merge:
+            self.parser.error("--merge-report requires at least one --merge")
+
+        if args.merge and not args.files:
+            self.parser.error("--merge requires an input file to use as the original reference")
+
+        if args.merge and len(args.files) != 1:
+            self.parser.error("--merge processes exactly one input file")
+
         if args.output_enc is None:
             args.output_enc = args.input_enc
 
@@ -167,6 +200,18 @@ class Pysubs2CLI:
                     with inpath.open("r", encoding=args.input_enc, errors=args.enc_error_handling) as infile:
                         subs = SSAFile.from_file(infile, args.input_format, fps=args.fps, **extra_input_args)
 
+                    merge_result = None
+                    if args.merge:
+                        try:
+                            revisions = self.load_revisions(args, extra_input_args)
+                            merged = subs.merge_revisions(revisions)
+                        except (OSError, TypeError, ValueError) as exc:
+                            print(f"Cannot merge {inpath}: {exc}", file=sys.stderr)
+                            errors += 1
+                            continue
+                        merge_result = merged
+                        subs = merged.subs
+
                     self.process(subs, args)
 
                     if args.output_format is None:
@@ -186,6 +231,9 @@ class Pysubs2CLI:
                     with outpath.open("w", encoding=args.output_enc, errors=args.enc_error_handling) as outfile:
                         subs.to_file(outfile, output_format, fps=args.fps, apply_styles=not args.clean,
                                      **extra_output_args)
+
+                    if merge_result is not None and args.merge_report is not None:
+                        self.write_merge_report(merge_result, args.merge_report)
         elif not sys.stdin.isatty():
             infile = TextIOWrapper(sys.stdin.buffer, encoding=args.input_enc, errors=args.enc_error_handling)
             outfile = TextIOWrapper(sys.stdout.buffer, encoding=args.output_enc, errors=args.enc_error_handling)
@@ -213,6 +261,33 @@ class Pysubs2CLI:
 
         if args.clean:
             subs.remove_miscellaneous_events()
+
+    @staticmethod
+    def load_revisions(
+            args: argparse.Namespace,
+            extra_input_args: dict[str, Any],
+    ) -> dict[str, SSAFile]:
+        revisions: dict[str, SSAFile] = {}
+        for author, path in args.merge:
+            if author in revisions:
+                raise ValueError(f"Duplicate reviewer name: {author!r}")
+            if not path.is_file():
+                raise FileNotFoundError(f"Revision for {author!r} not found: {path}")
+            with path.open("r", encoding=args.input_enc, errors=args.enc_error_handling) as infile:
+                revisions[author] = SSAFile.from_file(
+                    infile,
+                    fps=args.fps,
+                    **extra_input_args,
+                )
+        return revisions
+
+    @staticmethod
+    def write_merge_report(result: Any, path: Path) -> None:
+        import json
+
+        with path.open("w", encoding="utf-8") as fp:
+            json.dump(result.to_dict(), fp, ensure_ascii=False, indent=2)
+            fp.write("\n")
 
 
 def __main__() -> None:

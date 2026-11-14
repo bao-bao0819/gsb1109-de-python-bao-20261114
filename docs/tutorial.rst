@@ -198,9 +198,33 @@ It's better to save the file as ASS so that style information isn't lost.
     Dialogue: 0,0:00:00.00,0:01:00.00,Default,,0,0,0,,Once upon a time,
     Dialogue: 0,0:01:00.00,0:02:00.00,MyStyle,,0,0,0,,there was a SubRip file\Nwith two subtitles.
 
+Example: Merging proofread revisions
+------------------------------------
+Imagine three proofreaders received the same SRT file. One fixed timing, one fixed wording, and one split a long subtitle into two. Their files are complete copies of the original; the original remains the reference for anything a given proofreader did not change.
+
+::
+
+    import pysubs2
+
+    base = pysubs2.load("original.srt")
+    result = pysubs2.merge_revisions(base, {
+        "甲": pysubs2.load("retimed.srt"),
+        "乙": pysubs2.load("wording.srt"),
+        "丙": pysubs2.load("split.srt"),
+    })
+
+    result.subs.save("merged.srt")
+    print(result.groups[0].authors)       # ("甲", "乙", "丙")
+    print(result.groups[0].timing_authors)  # ("甲",)
+    print(result.groups[0].text_authors)    # ("乙", "丙")
+    print(result.unresolved)              # changes which could not be placed uniquely
+
+Because merging is field-based against the original, the timing-only file cannot overwrite the wording edit. Each :class:`pysubs2.revision.MergeGroup` corresponds to one subtitle of the original and may contain several merged events after a split; this is the unit for submitting the revision back to storage.
+
+When a split makes another reviewer's edit ambiguous, the edit is not guessed. For example, inserting a comma exactly between the two new subtitles leaves two possible destinations; such a change appears in ``result.unresolved`` with all candidate positions. If the edit falls entirely inside one of the split subtitles, it is merged there automatically.
+
 Example: Creating top/bottom bilingual subtitles
 ------------------------------------------------
-
 Let's say you have English and Italian subtitles for the same movie and you wish to create combined subtitle file with Italian subtitles located at the bottom and English at the top, with different colors
 for each language. The following code creates this combined file and saves it in SubStation Alpha format (this is important, you need to use a format that supports positioning):
 

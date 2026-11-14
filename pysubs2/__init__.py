@@ -1,7 +1,8 @@
-from . import cli, exceptions, formats, time
+from . import cli, exceptions, formats, revision, time
 from .common import VERSION, Alignment, Color
 from .exceptions import *
 from .formats import whisper
+from .revision import merge_revisions
 from .ssaevent import SSAEvent
 from .ssafile import SSAFile
 from .ssastyle import SSAStyle
@@ -19,6 +20,8 @@ __all__ = [
     "load",
     "load_from_whisper",
     "make_time",
+    "merge_revisions",
+    "revision",
     "time",
     "whisper",
 ]
