@@ -1,6 +1,15 @@
 Release Notes
 =============
 
+**Unreleased**
+
+- Added :meth:`SSAFile.merge` for combining multiple subtitle files while preserving each line's
+  effective styling. Styles are deduplicated by their definition (equivalent styles are stored once),
+  same-named styles with different definitions are both kept (the incoming one is renamed, eg.
+  ``Speaker`` -> ``Speaker 2``), and references to renamed styles are rewritten in event
+  :attr:`SSAEvent.style` fields and named style reset tags (``\\rStyle Name``). Bare ``\\r`` resets
+  are left untouched. Re-merging the same material adds no extra style names.
+
 **1.9.1** --- released on 2026-10-30
 
 - SRT parser is more conservative about removing subtitle indices (Issue #119)

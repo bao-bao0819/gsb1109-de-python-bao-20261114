@@ -47,6 +47,7 @@ Working with styles
 
 .. automethod:: SSAFile.rename_style
 .. automethod:: SSAFile.import_styles
+.. automethod:: SSAFile.merge
 
 Misc methods
 ~~~~~~~~~~~~

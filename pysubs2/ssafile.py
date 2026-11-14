@@ -1030,6 +1030,99 @@ class SSAFile(MutableSequence[SSAEvent]):
             if name not in self.styles or overwrite:
                 self.styles[name] = style
 
+    def merge(self, *subs: "SSAFile") -> None:
+        """
+        Merge events and styles from other subtitle files into this one.
+
+        Unlike :meth:`import_styles`, styles are deduplicated by their definition,
+        not merely by name. This makes it possible to combine several files that
+        use the same style names with different meanings (eg. two vendors both
+        ship a ``Speaker`` style, one for the interviewer and one for the interviewee)
+        while keeping every line's effective styling intact.
+
+        For every style in each merged-in file, one of the following happens:
+
+        - A style with the **same definition** already exists in this file (under any
+          name): it is reused, so equivalent styles are stored only once.
+        - The name is not taken yet: the style is imported under its original name.
+        - The name is taken by a style with a **different definition**: the incoming
+          style is kept as well, under a generated unique name (the original name with
+          a numeric suffix, eg. ``Speaker 2``).
+
+        References to renamed styles are rewritten in the merged events, both the
+        :attr:`SSAEvent.style` field and any named style reset tags (``\\rStyle Name``)
+        inside :attr:`SSAEvent.text`. Bare ``\\r`` tags, which reset to the event's own
+        line style, are left untouched, so styling that temporarily switches away and
+        resets mid-line is preserved.
+
+        Events are appended in the order of the given files. The merged-in files are
+        not modified (styles and events are copied); script info, Aegisub project data
+        and embedded fonts/graphics of this file are left unchanged.
+
+        Merging the same material more than once adds no extra style definitions or
+        names, because identical definitions always resolve to the existing style.
+
+        Arguments:
+            subs: One or more :class:`SSAFile` instances to merge in.
+
+        Raises:
+            TypeError: If any of the arguments is not an :class:`SSAFile`.
+
+        Example:
+            >>> interviewer = SSAFile.load("interviewer.ass")
+            >>> interviewee = SSAFile.load("interviewee.ass")
+            >>> corpus = SSAFile()
+            >>> corpus.merge(interviewer, interviewee)
+
+        """
+        from .formats.substation import replace_named_style_resets
+
+        for other in subs:
+            if not isinstance(other, SSAFile):
+                raise TypeError("Can only merge SSAFile instances.")
+
+            # Snapshot the inputs so that merging a file into itself keeps terminating.
+            incoming_styles = list(other.styles.items())
+            incoming_events = list(other.events)
+
+            # Maps each incoming style name to the name it ends up with in this file.
+            style_name_map: dict[str, str] = {}
+            taken_names = set(self.styles)
+
+            for incoming_name, incoming_style in incoming_styles:
+                # Reuse an existing style with an identical definition, regardless of its name.
+                matching_name = next(
+                    (name for name, style in self.styles.items() if style == incoming_style),
+                    None,
+                )
+                if matching_name is not None:
+                    style_name_map[incoming_name] = matching_name
+                    continue
+
+                if incoming_name in taken_names:
+                    target_name = self._unique_style_name(incoming_name, taken_names)
+                else:
+                    target_name = incoming_name
+
+                self.styles[target_name] = incoming_style.copy()
+                taken_names.add(target_name)
+                style_name_map[incoming_name] = target_name
+
+            for event in incoming_events:
+                merged_event = event.copy()
+                merged_event.style = style_name_map.get(merged_event.style, merged_event.style)
+                merged_event.text = replace_named_style_resets(merged_event.text, style_name_map)
+                self.events.append(merged_event)
+
+    @staticmethod
+    def _unique_style_name(base_name: str, taken_names: set[str]) -> str:
+        candidate = base_name
+        suffix = 2
+        while candidate in taken_names:
+            candidate = f"{base_name} {suffix}"
+            suffix += 1
+        return candidate
+
     # ------------------------------------------------------------------------
     # Helper methods
     # ------------------------------------------------------------------------

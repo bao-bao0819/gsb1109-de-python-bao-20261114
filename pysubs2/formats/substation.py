@@ -94,6 +94,35 @@ def is_valid_field_content(s: str) -> bool:
     return "\n" not in s and "," not in s
 
 
+#: Matches a named style reset tag (``\rStyle Name``) inside an override sequence.
+#: The accepted name characters mirror the tag grammar understood by :func:`parse_tags`.
+NAMED_STYLE_RESET = re.compile(r"\\r(?P<name>[a-zA-Z_0-9 ]+)")
+
+
+def replace_named_style_resets(text: str, renames: dict[str, str]) -> str:
+    """
+    Rewrite named style reset tags (``\\rStyle Name``) in event text.
+
+    Every ``\\r<name>`` override tag is replaced with ``\\r<new name>`` according
+    to the ``renames`` mapping. Bare ``\\r`` tags (which reset to the event's own
+    line style) and other override tags are left untouched, and the replacement is
+    confined to brace-delimited override sequences so that dialogue text is never
+    modified. This is used to keep ``\\r`` references valid when styles are renamed
+    during merging of multiple subtitle files.
+    """
+    if not renames:
+        return text
+
+    def replace_tag(match: re.Match[str]) -> str:
+        name = match.group("name")
+        return r"\r" + renames.get(name, name)
+
+    def rewrite_sequence(match: re.Match[str]) -> str:
+        return NAMED_STYLE_RESET.sub(replace_tag, match.group(0))
+
+    return SSAEvent.OVERRIDE_SEQUENCE.sub(rewrite_sequence, text)
+
+
 def parse_tags(text: str, style: SSAStyle = SSAStyle.DEFAULT_STYLE,
                styles: dict[str, SSAStyle] | None = None,
                skip_empty_fragments: bool = False) -> list[tuple[str, SSAStyle]]:
