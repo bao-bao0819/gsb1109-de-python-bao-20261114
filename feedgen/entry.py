@@ -95,6 +95,14 @@ class FeedEntry(object):
         self.__rss_source = None
         self.__rss_title = None
 
+        # Enclosure declarations (from RSS enclosures and ATOM enclosure
+        # links) along with explicitly declared URL equivalences and the
+        # caller's language preference used when a single primary enclosure
+        # has to be selected for RSS output.
+        self.__enclosure_declarations = []
+        self.__enclosure_equivalence = []
+        self.__enclosure_language = None
+
         # Extension list:
         self.__extensions = {}
         self.__extensions_register = {}
@@ -241,11 +249,12 @@ class FeedEntry(object):
         if self.__rss_comments:
             comments = xml_elem('comments', entry)
             comments.text = self.__rss_comments
-        if self.__rss_enclosure:
+        rss_enclosure = self._select_enclosure()
+        if rss_enclosure:
             enclosure = xml_elem('enclosure', entry)
-            enclosure.attrib['url'] = self.__rss_enclosure['url']
-            enclosure.attrib['length'] = self.__rss_enclosure['length']
-            enclosure.attrib['type'] = self.__rss_enclosure['type']
+            enclosure.attrib['url'] = rss_enclosure['url']
+            enclosure.attrib['length'] = rss_enclosure.get('length') or '0'
+            enclosure.attrib['type'] = rss_enclosure.get('type')
         if self.__rss_pubDate:
             pubDate = xml_elem('pubDate', entry)
             pubDate.text = formatRFC2822(self.__rss_pubDate)
@@ -433,21 +442,38 @@ class FeedEntry(object):
         the link element in ATOM feed entries. So for the RSS enclusure element
         the last link with rel=enclosure is used.
 
+        Every enclosure link is additionally recorded as an enclosure
+        declaration keeping its source, media type, length and language so
+        that declarations can be merged via enclosure_equivalence() and a
+        primary enclosure can be selected for RSS output.
+
         :param link:    Dict or list of dicts with data.
         :param replace: Add or replace old data.
         :returns: List of link data.
         '''
+        source = kwargs.pop('_source', 'atom')
         if link is None and kwargs:
             link = kwargs
         if link is not None:
             if replace or self.__atom_link is None:
                 self.__atom_link = []
-            self.__atom_link += ensure_format(
+                self.__enclosure_declarations = []
+            links = ensure_format(
                 link,
                 set(['href', 'rel', 'type', 'hreflang', 'title', 'length']),
                 set(['href']),
                 {'rel': ['alternate', 'enclosure', 'related', 'self', 'via']},
                 {'rel': 'alternate'})
+            self.__atom_link += links
+            for link in links:
+                if link.get('rel') == 'enclosure':
+                    self.__enclosure_declarations.append({
+                        'url': link['href'],
+                        'source': source,
+                        'type': link.get('type'),
+                        'length': link.get('length'),
+                        'language': link.get('hreflang'),
+                    })
             # RSS only needs one URL. We use the first link for RSS:
             for link in self.__atom_link:
                 if link.get('rel') == 'alternate':
@@ -654,7 +680,7 @@ class FeedEntry(object):
             self.__atom_source = {'link': url, 'title': title}
         return self.__rss_source
 
-    def enclosure(self, url=None, length=None, type=None):
+    def enclosure(self, url=None, length=None, type=None, language=None):
         '''Get or set the value of enclosure which describes a media object
         that is attached to the item. This is a RSS only value which is
         represented by link(rel=enclosure) in ATOM. ATOM feeds can furthermore
@@ -662,14 +688,174 @@ class FeedEntry(object):
         this method, if repeatedly called, will add more than one enclosures to
         the feed.  However, only the last one is used for RSS.
 
+        Each call is recorded as an enclosure declaration with source 'rss',
+        keeping the media type, length and language so it can be merged with
+        declarations from ATOM enclosure links via enclosure_equivalence().
+
         :param url: URL of the media object.
         :param length: Size of the media in bytes.
         :param type: Mimetype of the linked media.
+        :param language: Language of the media object. This is not part of
+                         the RSS enclosure element but kept with the
+                         declaration and used for language based selection.
         :returns: Data of the enclosure element.
         '''
         if url is not None:
-            self.link(href=url, rel='enclosure', type=type, length=str(length))
+            link = {'href': url, 'rel': 'enclosure', 'type': type,
+                    'length': str(length), '_source': 'rss'}
+            if language is not None:
+                link['hreflang'] = language
+            self.link(**link)
         return self.__rss_enclosure
+
+    def enclosure_equivalence(self, urls=None, replace=False):
+        '''Get or declare groups of equivalent enclosure URLs. A podcast
+        provider may announce the same media object both as an RSS enclosure
+        and as an ATOM enclosure link, for example with URLs which only
+        differ in the order of their query parameters. Declaring those URLs
+        as equivalent makes enclosures() merge their declarations into a
+        single group. URLs which are not declared equivalent are treated as
+        distinct media objects, for example audio tracks in different
+        languages.
+
+        This method can be called with:
+
+        - a list of URLs which are equivalent to each other
+        - a list of lists of URLs to declare several groups at once
+
+        :param urls:    URL or list of URLs (or list of URL lists) which are
+                        equivalent.
+        :param replace: Replace previously declared equivalences.
+        :returns: List of declared equivalence groups.
+        '''
+        if urls is not None:
+            if replace:
+                self.__enclosure_equivalence = []
+            if isinstance(urls, string_types):
+                urls = [urls]
+            if urls and all(isinstance(url, string_types) for url in urls):
+                self.__enclosure_equivalence.append(list(urls))
+            else:
+                for group in urls:
+                    self.__enclosure_equivalence.append(list(group))
+        return self.__enclosure_equivalence
+
+    def enclosures(self):
+        '''Get the enclosure declarations of the entry, merged according to
+        the equivalences declared with enclosure_equivalence(). Declarations
+        keep their source ('rss' or 'atom'), media type, length and language.
+
+        The result is a list of groups, one per distinct media object. Each
+        group is a dict with the fields:
+
+        - *urls* the declared URLs of the media object.
+        - *declarations* the individual declarations as dicts with the fields
+          url, source, type, length and language.
+        - *verified* whether the declarations of the group agree. If the
+          declared lengths or media types conflict, no single version can be
+          treated as a verified attachment and verified is False.
+        - *type* and *length* the agreed media type and length. Both are None
+          if the group is not verified.
+
+        :returns: List of merged enclosure groups.
+        '''
+        parent = {}
+
+        def find(url):
+            parent.setdefault(url, url)
+            root = url
+            while parent[root] != root:
+                root = parent[root]
+            while parent[url] != root:
+                parent[url], url = root, parent[url]
+            return root
+
+        for group in self.__enclosure_equivalence:
+            for url in group[1:]:
+                parent[find(group[0])] = find(url)
+
+        groups = {}
+        order = []
+        for declaration in self.__enclosure_declarations:
+            root = find(declaration['url'])
+            if root not in groups:
+                groups[root] = {'urls': [], 'declarations': []}
+                order.append(root)
+            group = groups[root]
+            if declaration['url'] not in group['urls']:
+                group['urls'].append(declaration['url'])
+            group['declarations'].append(declaration)
+
+        result = []
+        for root in order:
+            group = groups[root]
+            types = set(d['type'] for d in group['declarations']
+                        if d.get('type') is not None)
+            lengths = set(d['length'] for d in group['declarations']
+                          if d.get('length') is not None)
+            group['verified'] = len(types) <= 1 and len(lengths) <= 1
+            group['type'] = types.pop() if group['verified'] and types \
+                else None
+            group['length'] = lengths.pop() if group['verified'] and lengths \
+                else None
+            result.append(group)
+        return result
+
+    def enclosure_language(self, language=None):
+        '''Get or set the caller's language preference used to select the
+        primary enclosure when the entry is rendered as RSS, which permits
+        only a single enclosure per item. Enclosures not selected remain
+        available via enclosures() and enclosure_alternates().
+
+        :param language: Preferred language code, e.g. 'de' or 'de-DE'.
+        :returns: The configured language preference.
+        '''
+        if language is not None:
+            self.__enclosure_language = language
+        return self.__enclosure_language
+
+    @staticmethod
+    def __language_matches(declared, preferred):
+        '''Check if a declared language matches a language preference,
+        accepting subtags on either side (e.g. 'de' matches 'de-DE').'''
+        if not declared or not preferred:
+            return False
+        declared = declared.lower()
+        preferred = preferred.lower()
+        return declared == preferred \
+            or declared.startswith(preferred + '-') \
+            or preferred.startswith(declared + '-')
+
+    def _select_enclosure(self):
+        '''Select the primary enclosure declaration for RSS output. Only
+        verified groups are considered since a conflicting declaration must
+        not be treated as a verified attachment. The caller's language
+        preference takes precedence; otherwise the last declared enclosure
+        is used. Returns None if there is no usable enclosure.'''
+        groups = [group for group in self.enclosures() if group['verified']]
+        if not groups:
+            return None
+        if self.__enclosure_language:
+            for group in groups:
+                for declaration in group['declarations']:
+                    if self.__language_matches(declaration.get('language'),
+                                               self.__enclosure_language):
+                        return declaration
+        return groups[-1]['declarations'][-1]
+
+    def enclosure_alternates(self):
+        '''Get the enclosure declarations which are not selected as the
+        primary enclosure for RSS output. This allows callers to look up the
+        attachments which lost the selection, for example audio tracks in
+        other languages.
+
+        :returns: List of enclosure declarations not selected for RSS.
+        '''
+        selected = self._select_enclosure()
+        return [declaration
+                for group in self.enclosures()
+                for declaration in group['declarations']
+                if declaration is not selected]
 
     def ttl(self, ttl=None):
         '''Get or set the ttl value. It is an RSS only element. ttl stands for
