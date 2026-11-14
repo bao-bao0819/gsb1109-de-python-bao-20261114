@@ -20,6 +20,7 @@ except ImportError:
 
 import six
 from . import mcc
+from .amountformat import AmountFormatError, StatementAmountResolver
 
 odict = collections
 
@@ -232,6 +233,7 @@ class BrokerageBalance:
         self.name = None
         self.description = None
         self.value = None  # decimal
+        self.value_raw = None
 
 
 class Security:
@@ -293,6 +295,20 @@ class Statement(object):
         self.end_date = ''
         self.currency = ''
         self.transactions = []
+        # Raw amount strings as found in the file, kept next to the
+        # parsed values so the statement-level amount format
+        # resolution can reinterpret them.
+        self.balance_raw = None
+        self.available_balance_raw = None
+        # Result of the statement-level amount format resolution:
+        # the single AmountFormat the statement is written in, or
+        # None when more than one convention is consistent with the
+        # evidence (per-field candidates are then set instead).
+        self.amount_format = None
+        self.amount_format_candidates = None
+        self.amounts_reconciled = False
+        self.balance_candidates = None
+        self.available_balance_candidates = None
         # Error tracking:
         self.discarded_entries = []
         self.warnings = []
@@ -302,6 +318,10 @@ class InvestmentStatement(object):
     def __init__(self):
         self.positions = []
         self.transactions = []
+        # See Statement for the meaning of these.
+        self.amount_format = None
+        self.amount_format_candidates = None
+        self.amounts_reconciled = False
         # Error tracking:
         self.discarded_entries = []
         self.warnings = []
@@ -314,6 +334,11 @@ class Transaction(object):
         self.date = None
         self.user_date = None
         self.amount = None
+        # The raw TRNAMT string, and the candidate
+        # (AmountFormat, Decimal) pairs when the statement's amount
+        # format could not be resolved to a single convention.
+        self.amount_raw = None
+        self.amount_candidates = None
         self.id = ''
         self.memo = ''
         self.sic = None
@@ -345,6 +370,12 @@ class InvestmentTransaction(object):
         self.fees = decimal.Decimal(0)
         self.total = decimal.Decimal(0)
         self.tferaction = None
+        # Raw strings for the numeric fields above.
+        self.units_raw = None
+        self.unit_price_raw = None
+        self.commission_raw = None
+        self.fees_raw = None
+        self.total_raw = None
 
     def __repr__(self):
         return "<InvestmentTransaction type=" + str(self.type) + ", \
@@ -357,6 +388,10 @@ class Position(object):
         self.units = decimal.Decimal(0)
         self.unit_price = decimal.Decimal(0)
         self.market_value = decimal.Decimal(0)
+        # Raw strings for the numeric fields above.
+        self.units_raw = None
+        self.unit_price_raw = None
+        self.market_value_raw = None
 
 
 class Institution(object):
@@ -601,12 +636,15 @@ class OfxParser(object):
             position.security = tag.contents[0].strip()
         tag = ofx.find('units')
         if hasattr(tag, 'contents'):
+            position.units_raw = tag.contents[0].strip()
             position.units = cls.toDecimal(tag)
         tag = ofx.find('unitprice')
         if hasattr(tag, 'contents'):
+            position.unit_price_raw = tag.contents[0].strip()
             position.unit_price = cls.toDecimal(tag)
         tag = ofx.find('mktval')
         if hasattr(tag, 'contents'):
+            position.market_value_raw = tag.contents[0].strip()
             position.market_value = cls.toDecimal(tag)
         tag = ofx.find('dtpriceasof')
         if hasattr(tag, 'contents'):
@@ -647,18 +685,23 @@ class OfxParser(object):
             transaction.income_type = tag.contents[0].strip()
         tag = ofx.find('units')
         if hasattr(tag, 'contents'):
+            transaction.units_raw = tag.contents[0].strip()
             transaction.units = cls.toDecimal(tag)
         tag = ofx.find('unitprice')
         if hasattr(tag, 'contents'):
+            transaction.unit_price_raw = tag.contents[0].strip()
             transaction.unit_price = cls.toDecimal(tag)
         tag = ofx.find('commission')
         if hasattr(tag, 'contents'):
+            transaction.commission_raw = tag.contents[0].strip()
             transaction.commission = cls.toDecimal(tag)
         tag = ofx.find('fees')
         if hasattr(tag, 'contents'):
+            transaction.fees_raw = tag.contents[0].strip()
             transaction.fees = cls.toDecimal(tag)
         tag = ofx.find('total')
         if hasattr(tag, 'contents'):
+            transaction.total_raw = tag.contents[0].strip()
             transaction.total = cls.toDecimal(tag)
         tag = ofx.find('inv401ksource')
         if hasattr(tag, 'contents'):
@@ -753,15 +796,22 @@ class OfxParser(object):
             # <AVAILCASH>18073.98<MARGINBALANCE>+00000000000.00<SHORTBALANCE>+00000000000.00<BUYPOWER>+00000000000.00
             availcash_ofx = invbal_ofx.find('availcash')
             if availcash_ofx is not None:
+                statement.available_cash_raw = \
+                    availcash_ofx.contents[0].strip()
                 statement.available_cash = cls.toDecimal(availcash_ofx)
             margin_balance_ofx = invbal_ofx.find('marginbalance')
             if margin_balance_ofx is not None:
+                statement.margin_balance_raw = \
+                    margin_balance_ofx.contents[0].strip()
                 statement.margin_balance = cls.toDecimal(margin_balance_ofx)
             short_balance_ofx = invbal_ofx.find('shortbalance')
             if short_balance_ofx is not None:
+                statement.short_balance_raw = \
+                    short_balance_ofx.contents[0].strip()
                 statement.short_balance = cls.toDecimal(short_balance_ofx)
             buy_power_ofx = invbal_ofx.find('buypower')
             if buy_power_ofx is not None:
+                statement.buy_power_raw = buy_power_ofx.contents[0].strip()
                 statement.buy_power = cls.toDecimal(buy_power_ofx)
 
             ballist_ofx = invbal_ofx.find('ballist')
@@ -778,9 +828,12 @@ class OfxParser(object):
                             description_ofx.contents[0].strip()
                     value_ofx = balance_ofx.find('value')
                     if value_ofx is not None:
+                        brokerage_balance.value_raw = \
+                            value_ofx.contents[0].strip()
                         brokerage_balance.value = cls.toDecimal(value_ofx)
                     statement.balance_list.append(brokerage_balance)
 
+        cls.resolveInvestmentStatementAmounts(statement)
         return statement
 
     @classmethod
@@ -860,6 +913,8 @@ class OfxParser(object):
             if hasattr(balamt_tag, "contents"):
                 try:
                     setattr(statement, bal_attr, cls.toDecimal(balamt_tag))
+                    setattr(statement, bal_attr + '_raw',
+                            balamt_tag.contents[0].strip())
                 except (IndexError, decimal.InvalidOperation):
                     statement.warnings.append(
                         six.u("%s balance amount was empty for \
@@ -957,6 +1012,7 @@ class OfxParser(object):
                 if cls.fail_fast:
                     raise
 
+        cls.resolveStatementAmounts(statement)
         return statement
 
     @classmethod
@@ -1000,6 +1056,7 @@ class OfxParser(object):
         if hasattr(amt_tag, "contents"):
             try:
                 transaction.amount = cls.toDecimal(amt_tag)
+                transaction.amount_raw = amt_tag.contents[0].strip()
             except IndexError:
                 raise OfxParserException("Invalid Transaction Date")
             except decimal.InvalidOperation:
@@ -1088,6 +1145,156 @@ class OfxParser(object):
                     number"))
 
         return transaction
+
+    @classmethod
+    def applyAmountResolution(cls, obj, attr, resolution):
+        '''
+        Reinterpret one numeric attribute of ``obj`` using the
+        statement-level resolution.  The raw string is read from
+        ``<attr>_raw``.  When every surviving convention agrees on the
+        value the attribute is set to it; otherwise the attribute is
+        set to None and ``<attr>_candidates`` receives the list of
+        (AmountFormat, Decimal) pairs -- the caller gets candidates
+        instead of a guess.
+        '''
+        raw = getattr(obj, attr + '_raw', None)
+        if raw is None:
+            return
+        pairs = resolution.candidates(raw)
+        values = set(value for _, value in pairs)
+        if len(values) == 1:
+            setattr(obj, attr, values.pop())
+            setattr(obj, attr + '_candidates', None)
+        else:
+            setattr(obj, attr, None)
+            setattr(obj, attr + '_candidates', pairs)
+
+    @classmethod
+    def finishAmountResolution(cls, statement, resolution, attrs, owners):
+        statement.amount_format = resolution.format
+        statement.amount_format_candidates = resolution.effective
+        statement.amounts_reconciled = bool(resolution.reconciled)
+        for owner in owners:
+            for attr in attrs(owner):
+                cls.applyAmountResolution(owner, attr, resolution)
+
+    @classmethod
+    def resolveStatementAmounts(cls, statement):
+        '''
+        Statement-level amount format resolution for bank and credit
+        card statements.  All amounts of a statement share one
+        currency (its CURDEF), so a single convention must hold for
+        the whole statement.  Evidence: unambiguous amounts, the
+        subtotal of same-currency transactions and the explicit
+        ledger/available balance difference.  The machine locale is
+        never consulted.
+        '''
+        resolver = StatementAmountResolver()
+        txn_raws = [t.amount_raw for t in statement.transactions
+                    if t.amount_raw is not None]
+        for raw in txn_raws:
+            resolver.add_amount(raw)
+        for raw in (statement.balance_raw, statement.available_balance_raw):
+            resolver.add_amount(raw)
+        if (txn_raws and statement.balance_raw is not None
+                and statement.available_balance_raw is not None):
+            resolver.add_balance_difference(
+                statement.balance_raw, statement.available_balance_raw,
+                txn_raws, either_direction=True)
+        try:
+            resolution = resolver.resolve()
+        except AmountFormatError:
+            e = sys.exc_info()[1]
+            statement.warnings.append(
+                six.u('Inconsistent amount formats in statement: %s') % e)
+            statement.amount_format = None
+            statement.amount_format_candidates = []
+            if cls.fail_fast:
+                raise OfxParserException(six.u(
+                    'Inconsistent amount formats in statement: %s') % e)
+            return
+        owners = list(statement.transactions) + [statement]
+        cls.finishAmountResolution(
+            statement, resolution,
+            lambda owner: [attr for attr in ('amount', 'balance',
+                                             'available_balance')
+                           if getattr(owner, attr + '_raw', None)
+                           is not None],
+            owners)
+
+    @classmethod
+    def resolveInvestmentStatementAmounts(cls, statement):
+        '''
+        Statement-level amount format resolution for investment
+        statements.  Besides unambiguous amounts, the subtotal
+        identity ``units * unit_price ~= total`` (and
+        ``units * unit_price ~= mktval`` for positions) is used as
+        reconciliation evidence.
+        '''
+        resolver = StatementAmountResolver()
+        for position in statement.positions:
+            for raw in (position.units_raw, position.unit_price_raw,
+                        position.market_value_raw):
+                resolver.add_amount(raw)
+            if (position.units_raw is not None
+                    and position.unit_price_raw is not None
+                    and position.market_value_raw is not None):
+                resolver.add_product(
+                    [position.units_raw, position.unit_price_raw],
+                    position.market_value_raw)
+        for transaction in statement.transactions:
+            if isinstance(transaction, InvestmentTransaction):
+                for raw in (transaction.units_raw,
+                            transaction.unit_price_raw,
+                            transaction.commission_raw,
+                            transaction.fees_raw,
+                            transaction.total_raw):
+                    resolver.add_amount(raw)
+                if (transaction.units_raw is not None
+                        and transaction.unit_price_raw is not None
+                        and transaction.total_raw is not None):
+                    resolver.add_product(
+                        [transaction.units_raw,
+                         transaction.unit_price_raw],
+                        transaction.total_raw)
+            else:
+                resolver.add_amount(transaction.amount_raw)
+        balance_attrs = ('available_cash', 'margin_balance',
+                         'short_balance', 'buy_power')
+        for attr in balance_attrs:
+            resolver.add_amount(getattr(statement, attr + '_raw', None))
+        balance_list = getattr(statement, 'balance_list', None) or []
+        for brokerage_balance in balance_list:
+            resolver.add_amount(brokerage_balance.value_raw)
+        try:
+            resolution = resolver.resolve()
+        except AmountFormatError:
+            e = sys.exc_info()[1]
+            statement.warnings.append(
+                six.u('Inconsistent amount formats in statement: %s') % e)
+            statement.amount_format = None
+            statement.amount_format_candidates = []
+            if cls.fail_fast:
+                raise OfxParserException(six.u(
+                    'Inconsistent amount formats in statement: %s') % e)
+            return
+
+        def attrs(owner):
+            if isinstance(owner, Position):
+                return ('units', 'unit_price', 'market_value')
+            if isinstance(owner, InvestmentTransaction):
+                return ('units', 'unit_price', 'commission', 'fees',
+                        'total')
+            if isinstance(owner, BrokerageBalance):
+                return ('value',)
+            if isinstance(owner, InvestmentStatement):
+                return balance_attrs
+            return ('amount',)
+
+        owners = (list(statement.positions)
+                  + list(statement.transactions)
+                  + list(balance_list) + [statement])
+        cls.finishAmountResolution(statement, resolution, attrs, owners)
 
     @classmethod
     def toDecimal(cls, tag):

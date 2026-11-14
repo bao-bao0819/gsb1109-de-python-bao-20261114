@@ -114,7 +114,42 @@ Here's a sample program
   security.name
   security.ticker
   security.memo
-  
+
+
+Decimal and thousands separators
+================================
+
+Supplier-exported OFX files are inconsistent about number formats: some
+write ``1,234.56`` and others ``1.234,56``.  A lone ``1,234`` is
+ambiguous, so ofxparse resolves the format per statement (one currency)
+instead of per value, using unambiguous amounts, subtotals of
+same-currency transactions, explicit balance differences and investment
+``units * unit_price ~= total`` identities as evidence.  The machine
+locale is never consulted.
+
+.. code:: python
+
+  statement = account.statement
+  statement.amount_format             # The single AmountFormat the statement
+                                      # is written in, or None if ambiguous
+  statement.amount_format_candidates  # Conventions consistent with the evidence
+  statement.amounts_reconciled        # True if subtotal/balance checks passed
+
+  transaction = statement.transactions[0]
+  transaction.amount_raw              # The raw string, kept next to the value
+  transaction.amount                  # Decimal, or None when ambiguous
+  transaction.amount_candidates       # [(format, Decimal), ...] when ambiguous
+
+When both conventions explain a statement equally well, no value is
+guessed: the numeric fields are None and the candidate values are
+handed back in ``*_candidates``.  Each account in a multi-account file
+is resolved independently, and a statement whose amounts contradict
+every convention raises ``OfxParserException`` (or, with
+``fail_fast=False``, records a warning and leaves
+``amount_format_candidates`` empty) so it cannot be posted by mistake.
+The same machinery is available standalone as
+``ofxparse.StatementAmountResolver``.
+
 
 Help!
 =====
