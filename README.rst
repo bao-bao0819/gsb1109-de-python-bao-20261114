@@ -55,6 +55,29 @@ You can set the required precision with the optional ``precision`` parameter. Th
 
 You can decode into (lon, lat) tuples by setting ``geojson=True``.
 
+Common-source feasibility
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+When two encoded polylines are claimed to come from the same sequence of
+positioning points, ``compare`` decides whether one original coordinate
+sequence could have produced both, and reports the common allowed range
+for every point. Ranges are built from the exact rounding predicate used
+by ``encode`` (half values round away from zero, evaluated in floating
+point), so the floating-point boundary flips that defeat a simple
+"error below half a cell" test are handled correctly::
+
+    import polyline
+    forward, reversed_reading = polyline.compare(encoded_a, encoded_b)
+    forward.feasible
+    forward.first_infeasible  # first point with no common coordinate
+    forward.points[0].lat_range
+
+Each range is an inclusive ``(lower, upper)`` pair of floats that both
+encoders accept. A reversed reading is always evaluated as well, to cover
+a vendor sampling the same track in reverse order; when both
+orientations are feasible the caller is told explicitly. A command line
+wrapper is available through ``python -m polyline ENCODED_A ENCODED_B``.
+
 
 Development
 -----------
