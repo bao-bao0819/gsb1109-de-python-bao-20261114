@@ -134,6 +134,7 @@ class OpenDocument:
         self.mimetype = mimetype
         self.childobjects = []
         self._extra = []
+        self._package_manifest = None
         self.folder = u""  # Always empty for toplevel documents
         self.topnode = Document(mimetype=self.mimetype)
         self.topnode.ownerDocument = self
@@ -553,7 +554,7 @@ class OpenDocument:
             if what_it_is == IS_FILENAME:
                 self._z.write(fileobj, folder + arcname, zipfile.ZIP_STORED)
             else:
-                zi = zipfile.ZipInfo(str(arcname), self._now)
+                zi = zipfile.ZipInfo(str(folder + arcname), self._now)
                 zi.compress_type = zipfile.ZIP_STORED
                 zi.external_attr = UNIXPERMS
                 self._z.writestr(zi, fileobj)
@@ -980,6 +981,47 @@ def __detectmimetype(zipfd, odffile):
     return u'application/vnd.oasis.opendocument.text'
 
 
+def _isobjectfolder(mentry):
+    """
+    True when the manifest entry names an embedded-object folder located
+    directly inside the document being loaded (a single path segment).
+    @param mentry a unicode manifest path
+    @return a boolean
+    """
+    if not (mentry.startswith(u"Object ") and mentry.endswith(u"/")):
+        return False
+    segment = mentry[:-1]
+    return u"/" not in segment and segment[7:].isdigit()
+
+
+def _loadsubobject(z, manifest, parentdoc, objectpath, mediatype):
+    """
+    Loads an embedded object and, recursively, the objects it embeds
+    itself. Only entries below objectpath are considered, so the recursion
+    stays inside the package and terminates on cyclic references.
+    @param z an instance of zipfile.ZipFile
+    @param manifest Manifest data structured in a dictionary
+    @param parentdoc OpenDocument instance the object is embedded in
+    @param objectpath unicode folder path of the object in the zipfile
+    @param mediatype unicode media type of the embedded object
+    @return the loaded OpenDocument instance
+    """
+    subdoc = OpenDocument(mediatype, add_generator=False)
+    parentdoc.addObject(subdoc, u"/" + objectpath[:-1])
+    __loadxmlparts(z, manifest, subdoc, objectpath)
+    pictureprefix = objectpath + u"Pictures/"
+    for mentry, mvalue in manifest.items():
+        if mentry.startswith(pictureprefix) and len(mentry) > len(pictureprefix):
+            subdoc.addPicture(
+                mentry[len(objectpath):], mvalue['media-type'], z.read(mentry))
+        elif not mentry.startswith(objectpath):
+            continue
+        remainder = mentry[len(objectpath):]
+        if _isobjectfolder(remainder):
+            _loadsubobject(z, manifest, subdoc, mentry, mvalue['media-type'])
+    return subdoc
+
+
 def load(odffile):
     """
     Load an ODF file into memory
@@ -994,6 +1036,10 @@ def load(odffile):
     # Look in the manifest file to see if which of the four files there are
     manifestpart = z.read('META-INF/manifest.xml')
     manifest = manifestlist(manifestpart)
+    # Keep the raw package manifest so archiving can resolve media types of
+    # entries (such as pictures below an embedded object) that are not held
+    # in memory by the loader.
+    doc._package_manifest = manifest
     __loadxmlparts(z, manifest, doc, u'')
     for mentry, mvalue in manifest.items():
         if mentry[:9] == u"Pictures/" and len(mentry) > 9:
@@ -1003,10 +1049,8 @@ def load(odffile):
         elif mentry in (u'/', u'settings.xml', u'meta.xml', u'content.xml', u'styles.xml'):
             pass
         # Load subobjects into structure
-        elif mentry[:7] == u"Object " and len(mentry) < 11 and mentry[-1] == u"/":
-            subdoc = OpenDocument(mvalue['media-type'], add_generator=False)
-            doc.addObject(subdoc, u"/" + mentry[:-1])
-            __loadxmlparts(z, manifest, subdoc, mentry)
+        elif _isobjectfolder(mentry):
+            _loadsubobject(z, manifest, doc, mentry, mvalue['media-type'])
         elif mentry[:7] == u"Object ":
             pass  # Don't load subobjects as opaque objects
         else:
