@@ -19,6 +19,8 @@ from lxml import etree  # nosec - not using this for parsing
 import feedgen.version
 from feedgen.compat import string_types
 from feedgen.entry import FeedEntry
+from feedgen.pagination import FeedSnapshot, SnapshotExpiredError, \
+        _sorted_entries
 from feedgen.util import ensure_format, formatRFC2822, xml_elem
 
 _feedgen_version = feedgen.version.version_str
@@ -30,6 +32,13 @@ class FeedGenerator(object):
 
     def __init__(self):
         self.__feed_entries = []
+
+        # Published version used for snapshot based pagination. Bumped
+        # whenever the entry list changes. Only a limited number of
+        # versions is retained for paginating callers.
+        self.__feed_version = 0
+        self.__snapshots = {}
+        self.__snapshot_retention = 3
 
         # ATOM
         # https://tools.ietf.org/html/rfc4287
@@ -1038,6 +1047,7 @@ class FeedGenerator(object):
             self.__feed_entries.insert(0, feedEntry)
         else:
             self.__feed_entries.append(feedEntry)
+        self.__feed_version += 1
         return feedEntry
 
     def add_item(self, item=None):
@@ -1080,6 +1090,7 @@ class FeedGenerator(object):
                         pass
 
             self.__feed_entries += entry
+            self.__feed_version += 1
         return self.__feed_entries
 
     def item(self, item=None, replace=False):
@@ -1097,12 +1108,81 @@ class FeedGenerator(object):
             self.__feed_entries.remove(entry)
         else:
             self.__feed_entries.pop(entry)
+        self.__feed_version += 1
 
     def remove_item(self, item):
         '''Remove a single item from the feed. This is another name for
         remove_entry.
         '''
         self.remove_entry(item)
+
+    def _retained_versions(self):
+        '''Versions currently retained for snapshot based pagination.'''
+        return self.__snapshots.keys()
+
+    def snapshot_retention(self, retention=None):
+        '''Get or set how many published versions are retained for
+        snapshot based pagination. Once a version falls out of retention,
+        callers still paginating it are stopped with a SnapshotExpiredError
+        and have to restart with a full read from a new snapshot.
+
+        :param retention: Number of versions to retain (at least 1).
+        :returns: Current retention limit.
+        '''
+        if retention is not None:
+            retention = int(retention)
+            if retention < 1:
+                raise ValueError('Retention must be at least 1')
+            self.__snapshot_retention = retention
+            while len(self.__snapshots) > self.__snapshot_retention:
+                del self.__snapshots[min(self.__snapshots)]
+        return self.__snapshot_retention
+
+    def snapshot(self, version=None):
+        '''Pin the current entry list as a determined published version to
+        paginate from, or re-attach to a previously pinned version.
+
+        Pages taken from the returned FeedSnapshot always belong to this
+        one version: entries added or modified afterwards do not leak into
+        an ongoing pagination run but are left for the next incremental
+        round (see changes_since).
+
+        :param version: Version identifier of an earlier snapshot to
+            re-attach to. If omitted, the current state is pinned.
+        :returns: FeedSnapshot for the requested version.
+        :raises SnapshotExpiredError: If the requested version is no
+            longer retained. Restart with a full read from a new snapshot.
+        '''
+        if version is not None:
+            if version not in self.__snapshots:
+                raise SnapshotExpiredError(version)
+            return self.__snapshots[version]
+        snapshot = FeedSnapshot(self, self.__feed_version,
+                                list(self.__feed_entries))
+        self.__snapshots[self.__feed_version] = snapshot
+        while len(self.__snapshots) > self.__snapshot_retention:
+            del self.__snapshots[min(self.__snapshots)]
+        return snapshot
+
+    def changes_since(self, snapshot):
+        '''Entries added or modified after the given snapshot was pinned.
+
+        This is the next incremental round for callers which finished
+        paginating a snapshot: exactly those entries which are new or
+        whose updated value changed since the snapshot was taken,
+        sorted most recently updated first.
+
+        :param snapshot: FeedSnapshot the caller finished paginating.
+        :returns: List of FeedEntry objects.
+        :raises SnapshotExpiredError: If the snapshot's version is no
+            longer retained. Restart with a full read from a new snapshot.
+        '''
+        snapshot._check_retained()
+        states = snapshot._entry_states()
+        changed = [entry for entry in self.__feed_entries
+                   if id(entry) not in states
+                   or states[id(entry)] != entry.updated()]
+        return _sorted_entries(changed)
 
     def load_extension(self, name, atom=True, rss=True):
         '''Load a specific extension by name.
