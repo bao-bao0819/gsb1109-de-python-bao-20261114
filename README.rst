@@ -55,6 +55,39 @@ You can set the required precision with the optional ``precision`` parameter. Th
 
 You can decode into (lon, lat) tuples by setting ``geojson=True``.
 
+Checkpointed decoding
+^^^^^^^^^^^^^^^^^^^^^
+
+Decoding always restarts from the first character. For a long string that is
+read back repeatedly, a single scan can build a ``PolylineIndex`` holding the
+minimum number of checkpoints needed to keep every single-point read within a
+caller-supplied budget::
+
+    from polyline import PolylineIndex
+
+    index = PolylineIndex.build(expression, max_read=64)
+    index.point_count          # number of points in the polyline
+    index.checkpoints          # persisted parser state
+    index.decode_point(120)    # one ranged read of at most 64 characters
+    index.decode_slice(100, 110)
+
+Checkpoints only store point indices, character offsets and the accumulated
+integer coordinates, so they can be serialized with ``to_dict`` and reattached
+to any storage backend that implements ranged reads::
+
+    from polyline import PolylineIndex, StringRange
+
+    rebuilt = PolylineIndex.from_source(
+        StringRange(expression), list(index.checkpoints),
+        index.point_count, len(expression),
+    )
+
+A slice is read sequentially on top of the same checkpoint addressing; each
+individual ranged read still stays within ``max_read``. If one point's own
+encoding is longer than the budget, ``build`` raises
+``OversizedPointError`` naming the point, since no checkpoint can split a
+point's encoding into smaller reads.
+
 
 Development
 -----------
