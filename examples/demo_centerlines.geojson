@@ -1,0 +1,50 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {"id": "s7", "road": "G101", "m_start": 60, "m_end": 70},
+      "geometry": {"type": "LineString", "coordinates": [[6, 0], [7, 0]]}
+    },
+    {
+      "type": "Feature",
+      "properties": {"id": "s2", "road": "G101", "m_start": 10, "m_end": 20},
+      "geometry": {"type": "LineString", "coordinates": [[1, 0], [2, 0]]}
+    },
+    {
+      "type": "Feature",
+      "properties": {"id": "s4", "road": "G101", "m_start": 30, "m_end": 40},
+      "geometry": {"type": "LineString", "coordinates": [[3, 0], [4, 0]]}
+    },
+    {
+      "type": "Feature",
+      "properties": {"id": "s1", "road": "G101", "m_start": 10, "m_end": 0},
+      "geometry": {"type": "LineString", "coordinates": [[1, 0], [0, 0]]}
+    },
+    {
+      "type": "Feature",
+      "properties": {"id": "s6", "road": "G101", "m_start": 50, "m_end": 60},
+      "geometry": {"type": "LineString", "coordinates": [[5, 0], [6, 0]]}
+    },
+    {
+      "type": "Feature",
+      "properties": {"id": "t2", "road": "G202", "m_start": 5, "m_end": 10},
+      "geometry": {"type": "LineString", "coordinates": [[1, 9], [2, 9]]}
+    },
+    {
+      "type": "Feature",
+      "properties": {"id": "s5", "road": "G101", "m_start": 30, "m_end": 40},
+      "geometry": {"type": "LineString", "coordinates": [[3, 0], [3, 1]]}
+    },
+    {
+      "type": "Feature",
+      "properties": {"id": "s3", "road": "G101", "m_start": 20, "m_end": 30},
+      "geometry": {"type": "LineString", "coordinates": [[2, 0], [3, 0]]}
+    },
+    {
+      "type": "Feature",
+      "properties": {"id": "t1", "road": "G202", "m_start": 0, "m_end": 5},
+      "geometry": {"type": "LineString", "coordinates": [[0, 9], [1, 9]]}
+    }
+  ]
+}
