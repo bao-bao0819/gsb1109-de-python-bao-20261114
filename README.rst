@@ -56,6 +56,48 @@ You can set the required precision with the optional ``precision`` parameter. Th
 You can decode into (lon, lat) tuples by setting ``geojson=True``.
 
 
+Merging fragments
+^^^^^^^^^^^^^^^^^
+
+Devices often record one route as several numbered fragments. The fragments may
+arrive in any order and in either direction, and a hand-off may share more than
+one sample point. ``merge`` reconstructs the shortest point sequence that still
+contains every fragment as a contiguous run::
+
+    import polyline
+    polyline.merge({
+        1: [(38.500, -120.200), (40.700, -120.950)],
+        2: [(43.252, -126.453), (40.700, -120.950)],
+    })
+
+This returns ``[(38.5, -120.2), (40.7, -120.95), (43.252, -126.453)]``. The
+second fragment is reversed automatically. Fragments may also be encoded
+polylines, so a batch can be merged without decoding it manually::
+
+    polyline.merge([polyline.encode(first), polyline.encode(second)])
+    polyline.merge_encoded([first, second])
+
+A batch holds at most 12 fragments (``polyline.MAX_MERGE_FRAGMENTS``). Only the
+longest shared suffix/prefix of each junction is collapsed, and a multi-point
+fragment is never swallowed whole, so a genuine out-and-back leg keeps both
+visits to every repeated point. Passing ``include_reversals=True`` keeps routes
+that differ only by reversing the whole route, which is otherwise collapsed.
+
+To disambiguate such a reversal, pass ``start_point`` (also accepted as
+``start`` or ``origin``); the direction that actually starts there is put
+first. When two different shortest routes are possible, for example because the
+same intersection is visited twice, ``merge_candidates`` returns both. Each
+candidate records its placements and can be audited::
+
+    candidates = polyline.merge_candidates(segments)
+    for candidate in candidates:
+        assert candidate.verify(segments)
+        candidate.points        # merged sequence
+        candidate.fragment_ids  # order used
+        candidate.flipped       # per-fragment reversal flags
+        candidate.placements    # (fragment_id, start, stop) slices
+
+
 Development
 -----------
 All installation and development dependencies are fully specified in ``pyproject.toml``. The ``project.optional-dependencies`` object is used to `specify optional requirements <https://setuptools.pypa.io/en/latest/userguide/pyproject_config.html>`__ for various development tasks. This makes it possible to specify additional options when performing installation using ``pip``::
