@@ -51,6 +51,21 @@ Individual subtitles are :class:`pysubs2.SSAEvent` objects and have the attribut
     there was a SubRip file
     with two subtitles.
 
+Some events mix a drawn background with real text, for example station name
+signs which first paint a colored rectangle and then show the name in the same
+line. ``plaintext`` keeps the drawing commands, so use
+:attr:`pysubs2.SSAEvent.readable_text` for indexing, or
+:attr:`pysubs2.SSAEvent.station_name` together with
+:attr:`pysubs2.SSAEvent.station_name_spans` for the exact source offsets. To
+process a whole file, use :meth:`pysubs2.SSAFile.extract_station_names`; events
+which contain only drawings are skipped and never produce an empty name.
+
+    >>> event = SSAEvent(text=r"{\p1}m 0 0 l 100 0{\p0}Central")
+    >>> event.station_name
+    'Central'
+    >>> event.station_name_spans
+    [(23, 30)]
+
 A point about character encoding
 ################################
 

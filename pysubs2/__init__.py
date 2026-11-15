@@ -1,24 +1,30 @@
-from . import cli, exceptions, formats, time
+from . import cli, exceptions, formats, textfragments, time
 from .common import VERSION, Alignment, Color
 from .exceptions import *
 from .formats import whisper
 from .ssaevent import SSAEvent
 from .ssafile import SSAFile
 from .ssastyle import SSAStyle
+from .textfragments import Fragment, StationName, TextFragment, split_fragments
 
 __all__ = [
     "VERSION",
     "Alignment",
     "Color",
+    "Fragment",
     "SSAEvent",
     "SSAFile",
     "SSAStyle",
+    "StationName",
+    "TextFragment",
     "cli",
     "exceptions",
     "formats",
     "load",
     "load_from_whisper",
     "make_time",
+    "split_fragments",
+    "textfragments",
     "time",
     "whisper",
 ]

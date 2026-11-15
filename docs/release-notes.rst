@@ -1,6 +1,16 @@
 Release Notes
 =============
 
+**Unreleased**
+
+- Added ``pysubs2.textfragments`` with source-offset-aware fragments. Events can
+  now be split into readable text and drawing commands, with the drawing state
+  following inline ``\p``/``\p0`` switches and style resets (``\r``,
+  ``\rStyleName``). ``SSAEvent.readable_text``, ``SSAEvent.station_name``,
+  ``SSAEvent.station_name_spans`` and ``SSAFile.extract_station_names()`` expose
+  the extracted names and the exact source spans they came from. Lines which
+  contain only drawings are skipped, so they never produce an empty name.
+
 **1.9.1** --- released on 2026-10-30
 
 - SRT parser is more conservative about removing subtitle indices (Issue #119)

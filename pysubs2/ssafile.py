@@ -20,6 +20,7 @@ from .formats.webvtt import WebVTTFormat
 from .formats.whisper import WhisperJAXFormat
 from .ssaevent import SSAEvent
 from .ssastyle import SSAStyle
+from .textfragments import StationName, split_fragments, trim_readable
 from .time import make_time, ms_to_str
 
 logger = logging.getLogger(__name__)
@@ -1072,6 +1073,50 @@ class SSAFile(MutableSequence[SSAEvent]):
         Return list of events excluding SSA comment lines and lines with SSA drawing tags
         """
         return [e for e in self if e.is_text]
+
+    def get_station_names(self, styles: dict[str, SSAStyle] | None = None) -> list[StationName]:
+        """Alias for :meth:`SSAFile.extract_station_names`."""
+        return self.extract_station_names(styles)
+
+    @property
+    def station_names(self) -> list[StationName]:
+        """Station names extracted from the file; see :meth:`SSAFile.extract_station_names`."""
+        return self.extract_station_names()
+
+    def extract_station_names(self, styles: dict[str, SSAStyle] | None = None) -> list[StationName]:
+        """
+        Extract station names from dialogue events, with their source spans.
+
+        Events which are comments or contain no readable text (for example a
+        line which only paints a background) are skipped, so a drawing-only
+        line never produces an empty name. Mixed events which draw a
+        background and then show the station name are included; their name
+        comes only from the readable part.
+
+        The returned :class:`pysubs2.textfragments.StationName` objects carry
+        the half-open source offsets of the fragments which contributed to the
+        name, so callers can quote the original text.
+
+        """
+        if styles is None:
+            styles = self.styles
+
+        names: list[StationName] = []
+        for event in self:
+            if event.is_comment:
+                continue
+            event_style = styles.get(event.style, SSAStyle.DEFAULT_STYLE)
+            fragments = split_fragments(event.text, event_style, styles)
+            name, spans, readable = trim_readable(fragments)
+            if not name:
+                continue
+            names.append(StationName(
+                text=name,
+                event=event,
+                spans=spans,
+                fragments=readable,
+            ))
+        return names
 
     def equals(self, other: "SSAFile") -> bool:
         """

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, NotRequired, TextIO, TypedDict, Unpack, o
 from ..common import SSA_ALIGNMENT, Alignment, Color
 from ..ssaevent import SSAEvent
 from ..ssastyle import SSAStyle
+from ..textfragments import apply_override_sequence
 from ..time import TIMESTAMP, TIMESTAMP_SHORT, make_time, ms_to_times, timestamp_to_ms
 from ..warnings import SubtitleAttributeWarning, TimestampOverflow, TimestampUnderflow
 from .base import FormatBase
@@ -99,68 +100,50 @@ def parse_tags(text: str, style: SSAStyle = SSAStyle.DEFAULT_STYLE,
                skip_empty_fragments: bool = False) -> list[tuple[str, SSAStyle]]:
     """
     Split text into fragments with computed SSAStyles.
-    
+
     Returns list of tuples (fragment, style), where fragment is a part of text
     between two brace-delimited override sequences, and style is the computed
     styling of the fragment, ie. the original style modified by all override
     sequences before the fragment.
-    
+
     Newline and non-breakable space overrides are left as-is.
-    
+
     Supported override tags:
-    
+
     - i, b, u, s
     - fn
     - r (with or without style name)
-    
+    - p (drawing mode, with positive scale meaning "drawing")
+
+    Note that a line style reset (``\r``) also leaves drawing mode. This is
+    the same state machine used by :func:`pysubs2.textfragments.split_fragments`,
+    which additionally reports source offsets for each fragment.
+
     """
     if styles is None:
         styles = {}
-    
-    fragments = SSAEvent.OVERRIDE_SEQUENCE.split(text)
-    if len(fragments) == 1:
+
+    if SSAEvent.OVERRIDE_SEQUENCE.search(text) is None:
         if skip_empty_fragments and not text:
             return []
-        else:
-            return [(text, style)]
-    
-    def apply_overrides(all_overrides: str) -> SSAStyle:
-        s = style.copy()
-        for tag in re.findall(r"\\[ibusp][0-9]|\\r[a-zA-Z_0-9 ]*|\\fn[a-zA-Z_0-9 ]+", all_overrides):
-            if tag == r"\r":
-                s = style.copy() # reset to original line style
-            elif tag.startswith(r"\r"):
-                name = tag[2:]
-                if name in styles:
-                    # reset to named style
-                    s = styles[name].copy()
-            elif tag.startswith(r"\fn"):
-                fontname = tag[3:]
-                s.fontname = fontname
-            else:
-                if "i" in tag:
-                    s.italic = "1" in tag
-                elif "b" in tag:
-                    s.bold = "1" in tag
-                elif "u" in tag:
-                    s.underline = "1" in tag
-                elif "s" in tag:
-                    s.strikeout = "1" in tag
-                elif "p" in tag:
-                    try:
-                        scale = int(tag[2:])
-                    except (ValueError, IndexError):
-                        continue
+        return [(text, style)]
 
-                    s.drawing = scale > 0
-        return s
-    
     overrides = SSAEvent.OVERRIDE_SEQUENCE.findall(text)
-    overrides_prefix_sum = ["".join(overrides[:i]) for i in range(len(overrides) + 1)]
-    computed_styles = map(apply_overrides, overrides_prefix_sum)
-    output = list(zip(fragments, computed_styles))
-    if skip_empty_fragments:
-        output = [(fragment, sty) for fragment, sty in output if fragment]
+    fragments = SSAEvent.OVERRIDE_SEQUENCE.split(text)
+    current_style = style.copy()
+    drawing_scale = 1 if style.drawing else 0
+    output: list[tuple[str, SSAStyle]] = []
+
+    for index, fragment in enumerate(fragments):
+        if not (skip_empty_fragments and not fragment):
+            fragment_style = current_style.copy()
+            fragment_style.drawing = drawing_scale > 0
+            output.append((fragment, fragment_style))
+
+        if index < len(overrides):
+            drawing_scale, current_style = apply_override_sequence(
+                overrides[index], current_style, style, styles, drawing_scale)
+
     return output
 
 

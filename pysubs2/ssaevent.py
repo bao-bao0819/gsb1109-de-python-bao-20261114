@@ -1,10 +1,13 @@
 import dataclasses
 import re
 import warnings
-from typing import Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from .common import IntOrFloat
 from .time import make_time, ms_to_str
+
+if TYPE_CHECKING:
+    from .textfragments import Fragment
 
 
 @dataclasses.dataclass(repr=False, eq=False, order=False)
@@ -96,9 +99,88 @@ class SSAEvent:
 
     @property
     def is_drawing(self) -> bool:
-        """Returns True if line is SSA drawing tag (ie. not text)"""
+        """
+        Returns True if line contains an SSA drawing tag (ie. it draws something).
+
+        This is a conservative check kept for compatibility with subtitle
+        writers: a mixed line which draws a background and then shows a
+        station name still counts as a drawing here. Use :attr:`has_text` or
+        :attr:`station_name` when you care about the readable part only.
+        """
         from .formats.substation import parse_tags
         return any(sty.drawing for _, sty in parse_tags(self.text))
+
+    @property
+    def has_text(self) -> bool:
+        """Returns True when the line has at least one readable text fragment."""
+        from .textfragments import split_fragments
+        return any(not fragment.drawing for fragment in split_fragments(self.text))
+
+    @property
+    def fragments(self) -> list["Fragment"]:
+        """
+        Readable text and drawing fragments with their source offsets.
+
+        See :func:`pysubs2.textfragments.split_fragments` for details. The
+        offsets always refer to :attr:`SSAEvent.text`.
+        """
+        from .textfragments import split_fragments
+        return split_fragments(self.text)
+
+    @property
+    def readable_text(self) -> str:
+        """
+        Concatenated readable text of the line, without drawing payloads.
+
+        Override sequences and drawing commands are dropped; ``\\N``/``\\n``
+        become newlines and ``\\h`` becomes a space. This is the text that
+        should be indexed for searching.
+        """
+        from .textfragments import readable_text
+        return readable_text(self.text)
+
+    @property
+    def text_fragments(self) -> list["Fragment"]:
+        """Alias for :attr:`SSAEvent.fragments`."""
+        return self.fragments
+
+    @property
+    def readable_fragments(self) -> list["Fragment"]:
+        """Readable text fragments of the line (drawing fragments are omitted)."""
+        return [fragment for fragment in self.fragments if not fragment.drawing]
+
+    @property
+    def drawing_fragments(self) -> list["Fragment"]:
+        """Drawing fragments of the line (readable text fragments are omitted)."""
+        return [fragment for fragment in self.fragments if fragment.drawing]
+
+    @property
+    def station_name(self) -> str:
+        """
+        Best-effort station name extracted from the line.
+
+        The name is the concatenation of all readable text fragments, with
+        surrounding whitespace stripped. Drawing payloads and override
+        sequences are not part of it, and a line which contains only
+        drawings returns an empty string rather than a blank name.
+        """
+        from .textfragments import trim_readable
+        name, _, _ = trim_readable(self.fragments)
+        return name
+
+    @property
+    def station_name_spans(self) -> list[tuple[int, int]]:
+        """
+        Source offsets of the readable fragments which make up the station name.
+
+        Each tuple is a half-open ``(start, end)`` interval in
+        :attr:`SSAEvent.text`. Leading and trailing whitespace is trimmed, and
+        an inline tag which splits the name results in more than one interval.
+        A drawing-only line has no spans.
+        """
+        from .textfragments import trim_readable
+        _, spans, _ = trim_readable(self.fragments)
+        return list(spans)
 
     @property
     def is_text(self) -> bool:
@@ -106,6 +188,11 @@ class SSAEvent:
         Returns False for SSA drawings and comment lines, True otherwise
 
         In general, for non-SSA formats these events should be ignored.
+
+        .. note:: A mixed line which paints a background and then shows a
+                  station name still counts as a drawing here, preserving the
+                  historical writer behaviour. Use :attr:`has_text` or
+                  :attr:`station_name` when only the readable part matters.
         """
         return not (self.is_comment or self.is_drawing)
 
@@ -113,6 +200,10 @@ class SSAEvent:
     def plaintext(self) -> str:
         """
         Subtitle text as multi-line string with no tags (read/write property).
+
+        Override sequences are removed and ``\\N``/``\\n`` become newlines,
+        ``\\h`` becomes a space. Drawing payloads are *not* removed; use
+        :attr:`readable_text` or :attr:`station_name` for that.
 
         Writing to this property replaces :attr:`SSAEvent.text` with given plain
         text. Newlines are converted to ``\\N`` tags.

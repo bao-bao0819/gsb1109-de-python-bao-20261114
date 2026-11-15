@@ -52,6 +52,7 @@ Misc methods
 ~~~~~~~~~~~~
 
 .. automethod:: SSAFile.remove_miscellaneous_events
+.. automethod:: SSAFile.extract_station_names
 .. automethod:: SSAFile.equals
 .. automethod:: SSAFile.sort
 
@@ -61,6 +62,12 @@ Misc methods
 
 .. autoclass:: pysubs2.SSAEvent
    :members:
+
+``pysubs2.textfragments`` --- readable text and drawing commands
+----------------------------------------------------------------
+
+.. automodule:: pysubs2.textfragments
+   :members: Fragment, StationName, split_fragments, readable_text
 
 ``SSAStyle`` --- a subtitle style
 ---------------------------------
